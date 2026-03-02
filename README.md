@@ -7,26 +7,50 @@ Yet Another Memory Layer, inspired by Cognitive Science, designed for Cyber Waif
 
 ## Core Design
 
-These are the design goals for Plast Mem, some of which may not yet been implemented. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for implementation details.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed implementation.
 
 ### Self-hosted first
 
 Plast Mem is built around self-hosting and does not try to steer you towards a website with a 'Pricing' tab.
 
 Written in Rust, it is packaged as a single binary (or Docker image)
-and requires only a connection to an LLM service (such as [llama.cpp](https://github.com/ggml-org/llama.cpp)) and a [ParadeDB](https://github.com/paradedb/paradedb) database to work.
+and requires only a connection to an LLM service (such as [llama.cpp](https://github.com/ggml-org/llama.cpp), [Ollama](https://github.com/ollama/ollama)) and a [ParadeDB](https://github.com/paradedb/paradedb) database to work.
 
 ### Event Segmentation Theory
 
 Conversations flow continuously, but human memory segments them into discrete episodes.
 Plast Mem uses [Event Segmentation Theory](https://en.wikipedia.org/wiki/Psychology_of_film#Segmentation) to detect natural boundaries—topic shifts, time gaps, or message accumulation—and creates episodic memories at these boundaries.
 
+Messages are accumulated in a queue and processed in batches. A single LLM call segments conversations into coherent episodes, each with a title, summary, and surprise level.
+
+### Dual-Layer Memory Architecture
+
+Plast Mem implements two complementary memory layers inspired by cognitive science:
+
+**Episodic Memory** captures "what happened"—discrete conversation events with temporal boundaries. Each episode stores the original messages, an LLM-generated summary, and FSRS parameters for decay modeling.
+
+**Semantic Memory** captures "what is known"—durable facts and behavioral guidelines extracted from episodes. Facts are categorized into 8 types (identity, preference, interest, personality, relationship, experience, goal, guideline) and use temporal validity instead of decay.
+
+The **Consolidation Pipeline** (inspired by CLS theory) runs offline to extract semantic facts from unconsolidated episodes. When 3+ episodes accumulate or a flashbulb memory (surprise ≥ 0.85) occurs, an LLM processes the episodes against existing knowledge and performs new/reinforce/update/invalidate actions.
+
+### Hybrid Retrieval
+
+Memory retrieval combines multiple signals for relevance:
+
+- **BM25** full-text search on summaries and keywords
+- **Vector similarity** via embeddings (cosine distance)
+- **Reciprocal Rank Fusion (RRF)** to merge keyword and semantic scores
+- **FSRS retrievability** re-ranking for episodic memories (decay modeling)
+
+The search returns the most relevant memories from both episodic and semantic layers, formatted as markdown for LLM consumption.
+
 ### FSRS
 
-By introducing [FSRS (Free Spaced Repetition Scheduler)](https://github.com/open-spaced-repetition/fsrs4anki/wiki/The-Algorithm), we can determine when a memory should be forgotten.
+[FSRS (Free Spaced Repetition Scheduler)](https://github.com/open-spaced-repetition/fsrs4anki/wiki/The-Algorithm) determines when an episodic memory should be forgotten.
 
-Retrieval records candidate memories for review; when the conversation is later segmented,
-An LLM evaluates each memory's relevance (Again/Hard/Good/Easy) and updates FSRS parameters accordingly.
+**Surprise-based initialization**: Episodes with high surprise (significant information gain) receive a stability boost, making them decay slower.
+
+**Review mechanism**: Retrieval records candidate memories for review. When the conversation is later segmented, an LLM evaluates each memory's relevance (Again/Hard/Good/Easy) and updates FSRS parameters (stability, difficulty) accordingly. Semantic memories do not use FSRS—they remain valid until explicitly contradicted and invalidated.
 
 ## FAQ
 
