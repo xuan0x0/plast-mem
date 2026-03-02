@@ -29,6 +29,8 @@ pub struct EventSegmentationJob {
   pub conversation_id: Uuid,
   /// Number of messages in the queue when this job was triggered.
   pub fence_count: i32,
+  /// Whether processing is forced (reached max window).
+  pub force_process: bool,
 }
 
 // ──────────────────────────────────────────────────
@@ -86,68 +88,37 @@ struct SegmentItem {
   surprise_level: SurpriseLevel,
 }
 
-const SEGMENTATION_SYSTEM_PROMPT: &str = "\
-# Instruction
+const SEGMENTATION_SYSTEM_PROMPT: &str = r#"
+Your task is to segment the conversation into continuous, non-overlapping blocks using a hybrid strategy.
+You must create a new segment boundary whenever there is a **Topic Shift** OR a **Surprise Shift**.
 
-You are an episodic memory segmentation system (Event Segmentation Theory).
-Segment the conversation into episodes — moments where the current event model no longer predicts the next turn.
+When in doubt, prefer finer granularity (split rather than merge).
 
-A segment boundary MUST be created when **either**:
-- The topic or intent changes meaningfully, OR
-- The new message is surprising or discontinuous relative to prior context.
+# Boundary Triggers (Split when ANY of these occur)
 
-When in doubt, split rather than merge.
+1. **Topic & Intent:** - Meaningful changes in semantic focus, goals, or activities.
+ - Subtopic transitions or shifts in user intent (e.g., venting → requesting help).
+ - Explicit discourse markers signaling transitions (e.g., "by the way", "anyway", "换个话题", "对了").
 
----
+2. **Surprise & Discontinuity:** - Abrupt emotional reversals or unexpected vulnerability.
+ - Sudden shifts between personal/emotional and logistical/factual content.
+ - Introduction of a completely new domain (e.g., health → finance).
+ - Sharp changes in tone, register, or notable time gaps.
 
-# Output Format
+# Field Guidelines (Adhere strictly to the JSON schema)
 
-Return a JSON list of segments. Each segment must include:
-- `start_message_index` — 0-indexed position of the first message (inclusive)
-- `end_message_index` — 0-indexed position of the last message (inclusive)
-- `num_messages` — number of messages; must equal `end_message_index − start_message_index + 1`
-- `title` — 5–15 words capturing the core theme
-- `summary` — ≤50 words, third-person narrative (e.g., \"The user asked X; the assistant explained Y…\")
-- `surprise_level` — `low` | `high` | `extremely_high` (relative to the preceding segment)
+- **title:** 5-15 words capturing the core theme.
+- **summary:** ≤50 words, third-person narrative (e.g., "The user asked X; the assistant explained Y...").
+- **surprise_level:** Measure how abruptly the segment begins relative to the *preceding* segment (First segment is `low` unless continuing from a prior episode):
+  - `low`: Gradual or routine transition.
+  - `high`: Noticeable discontinuity (unexpected emotion, intent reversal, domain change).
+  - `extremely_high`: Stark break (shocking event, intense emotion, major domain jump).
 
----
+# Quality Constraints
 
-# Segmentation Rules
-
-## 1. Topic-Aware Rules
-- Group consecutive messages sharing the same semantic focus, goal, or activity.
-- A boundary occurs when subject matter, intent, or activity changes meaningfully.
-- Subtopic changes count (e.g., emotional support → career advice → casual chat).
-- Watch for discourse markers: \"by the way\", \"anyway\", \"换个话题\", \"对了\" — these signal deliberate transitions.
-- Intent shifts count: chatting→deciding, venting→requesting help.
-
-## 2. Surprise-Aware Rules
-Create a boundary if a message diverges abruptly from prior context:
-- Sudden emotional reversal or unexpected vulnerability
-- Shift between personal/emotional and logistical/factual content
-- Introduction of a new domain (health, work, relationships, finance, etc.)
-- Sharp change in tone, register, or a notable time gap (visible in timestamps)
-
-## 3. Fusion Policy
-- A boundary is created if **either** channel triggers — topic shift OR surprise.
-- Prefer finer granularity: when in doubt, split rather than merge.
-
-## 4. Surprise Level
-Measures how abruptly this segment begins relative to the preceding segment:
-- `low` — gradual or routine transition
-- `high` — noticeable discontinuity: unexpected emotion, intent reversal, or domain change
-- `extremely_high` — stark break: shocking event, intense emotion, or major domain jump
-
-First segment: assess relative to the previous episode summary if provided; otherwise use `low`.
-
----
-
-# Quality Requirements
-- Segments must be consecutive, non-overlapping, and cover all messages exactly once.
-- The first segment must start at message index 0.
-- `num_messages` is the authoritative field for slicing and must be accurate.
-- All `num_messages` values must sum to the total input message count.
-- A single coherent conversation must return exactly one segment covering all messages.";
+- Segments must completely cover all messages exactly once, starting from index 0.
+- Mathematical accuracy is strict: `num_messages` MUST equal `end_message_index - start_message_index + 1`.
+- A single coherent conversation without shifts must return exactly one segment."#;
 
 fn format_messages(messages: &[Message]) -> String {
   messages
@@ -181,7 +152,7 @@ async fn batch_segment(
     None => format!("Messages to segment:\n{formatted}"),
   };
 
-  let system = ChatCompletionRequestSystemMessage::from(SEGMENTATION_SYSTEM_PROMPT);
+  let system = ChatCompletionRequestSystemMessage::from(SEGMENTATION_SYSTEM_PROMPT.trim());
   let user = ChatCompletionRequestUserMessage::from(user_content);
 
   let output = generate_object::<SegmentationOutput>(
@@ -315,6 +286,30 @@ async fn create_episode(
   Ok(Some(CreatedEpisode { surprise }))
 }
 
+async fn create_episodes_batch(
+  conversation_id: Uuid,
+  segments: &[BatchSegment],
+  db: &DatabaseConnection,
+) -> Result<Vec<CreatedEpisode>, AppError> {
+  let futures: Vec<_> = segments
+    .iter()
+    .map(|seg| {
+      create_episode(
+        conversation_id,
+        &seg.messages,
+        &seg.title,
+        &seg.summary,
+        seg.surprise_level.to_signal(),
+        db,
+      )
+    })
+    .collect();
+
+  let episodes: Vec<CreatedEpisode> = try_join_all(futures).await?.into_iter().flatten().collect();
+
+  Ok(episodes)
+}
+
 // ──────────────────────────────────────────────────
 // Job processing
 // ──────────────────────────────────────────────────
@@ -326,16 +321,13 @@ pub async fn process_event_segmentation(
   semantic_storage: Data<PostgresStorage<SemanticConsolidationJob>>,
 ) -> Result<(), AppError> {
   let db = &*db;
-  let review_storage = &*review_storage;
-  let semantic_storage = &*semantic_storage;
   let conversation_id = job.conversation_id;
   let fence_count = job.fence_count as usize;
+  let force_process = job.force_process;
 
   let current_messages = MessageQueue::get(conversation_id, db).await?.messages;
-  let window_doubled = MessageQueue::get_or_create_model(conversation_id, db)
-    .await?
-    .window_doubled;
 
+  // Stale job check
   if current_messages.len() < fence_count {
     tracing::debug!(
       conversation_id = %conversation_id,
@@ -348,95 +340,55 @@ pub async fn process_event_segmentation(
   }
 
   let batch_messages = &current_messages[..fence_count];
-
-  tracing::debug!(
-    conversation_id = %conversation_id,
-    fence_count,
-    window_doubled,
-    "Processing batch segmentation"
-  );
-
   let prev_summary = MessageQueue::get_prev_episode_summary(conversation_id, db).await?;
   let segments = batch_segment(batch_messages, prev_summary.as_deref()).await?;
 
-  match segments.len() {
-    // ── No split ──────────────────────────────────────────────────────────
-    1 if !window_doubled => {
-      tracing::info!(conversation_id = %conversation_id, "No split detected — doubling window");
-      MessageQueue::set_doubled_and_clear_fence(conversation_id, db).await?;
-    }
+  // Single segment and not forced: defer processing and wait for more messages
+  if segments.len() == 1 && !force_process {
+    tracing::info!(conversation_id = %conversation_id, "No split detected — deferring for more messages");
+    MessageQueue::clear_fence(conversation_id, db).await?;
+    return Ok(());
+  }
 
-    // ── No split after doubling: force drain ──────────────────────────────
+  // Determine which segments to drain and the summary for the next iteration
+  let (drain_segments, new_prev_summary): (&[BatchSegment], Option<String>) = match segments.len() {
     1 => {
       tracing::info!(
         conversation_id = %conversation_id,
         messages = fence_count,
-        "No split after doubled window — force draining as single episode"
+        "Force processing as single episode (reached max window)"
       );
-      let seg = &segments[0];
-
-      MessageQueue::drain(conversation_id, fence_count, db).await?;
-      MessageQueue::finalize_job(conversation_id, None, db).await?;
-
-      enqueue_pending_reviews(conversation_id, batch_messages, db, review_storage).await?;
-
-      if let Some(episode) = create_episode(
-        conversation_id,
-        &seg.messages,
-        &seg.title,
-        &seg.summary,
-        seg.surprise_level.to_signal(),
-        db,
-      )
-      .await?
-      {
-        enqueue_semantic_consolidation(conversation_id, episode, db, semantic_storage).await?;
-      }
+      (&segments[..], None)
     }
-
-    // ── Multiple segments: drain all but last ─────────────────────────────
     _ => {
-      let drain_segments = &segments[..segments.len() - 1];
-
+      let to_drain = &segments[..segments.len() - 1];
+      let last_summary = Some(to_drain.last().expect("non-empty").summary.clone());
       tracing::info!(
         conversation_id = %conversation_id,
         total_segments = segments.len(),
-        draining = drain_segments.len(),
+        draining = to_drain.len(),
         "Batch segmentation complete"
       );
-
-      let drain_count: usize = drain_segments.iter().map(|s| s.messages.len()).sum();
-      let new_prev_summary = Some(drain_segments.last().expect("non-empty").summary.clone());
-      MessageQueue::drain(conversation_id, drain_count, db).await?;
-      MessageQueue::finalize_job(conversation_id, new_prev_summary, db).await?;
-
-      enqueue_pending_reviews(conversation_id, batch_messages, db, review_storage).await?;
-
-      let episode_futures: Vec<_> = drain_segments
-        .iter()
-        .map(|seg| {
-          create_episode(
-            conversation_id,
-            &seg.messages,
-            &seg.title,
-            &seg.summary,
-            seg.surprise_level.to_signal(),
-            db,
-          )
-        })
-        .collect();
-
-      let created_episodes: Vec<CreatedEpisode> = try_join_all(episode_futures)
-        .await?
-        .into_iter()
-        .flatten()
-        .collect();
-
-      for episode in created_episodes {
-        enqueue_semantic_consolidation(conversation_id, episode, db, semantic_storage).await?;
-      }
-
+      (to_drain, last_summary)
     }
+  };
+
+  // Calculate total messages to drain
+  let drain_count: usize = drain_segments.iter().map(|s| s.messages.len()).sum();
+
+  // Enqueue pending reviews before draining
+  enqueue_pending_reviews(conversation_id, batch_messages, db, &review_storage).await?;
+
+  // Drain first (crash safety: if we crash after drain, messages are gone - acceptable loss)
+  MessageQueue::drain(conversation_id, drain_count, db).await?;
+  MessageQueue::finalize_job(conversation_id, new_prev_summary, db).await?;
+
+  // Then create episodes (if crash here, messages already gone - no duplicates on retry)
+  let episodes = create_episodes_batch(conversation_id, drain_segments, db).await?;
+
+  // Enqueue semantic consolidation jobs
+  for episode in episodes {
+    enqueue_semantic_consolidation(conversation_id, episode, db, &semantic_storage).await?;
   }
 
   Ok(())
