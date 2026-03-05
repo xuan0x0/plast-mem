@@ -1,5 +1,6 @@
-import process from 'node:process'
+import { stdout } from 'node:process'
 
+import { sleep } from '@moeru/std'
 import { benchmarkJobStatus } from 'plastmem'
 
 const INITIAL_WAIT_MS = 2 * 60_000
@@ -11,12 +12,6 @@ interface ConversationStatus {
   fence_active: boolean
   messages_pending: number
 }
-
-const sleep = async (ms: number): Promise<void> =>
-  new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms)
-    void timer
-  })
 
 const getStatus = async (
   baseUrl: string,
@@ -44,7 +39,7 @@ export const waitForAll = async (
   if (uniqueIds.length === 0)
     return
 
-  process.stdout.write('  Waiting 2 minutes before polling background jobs...\n')
+  stdout.write('  Waiting 2 minutes before polling background jobs...\n')
   await sleep(INITIAL_WAIT_MS)
 
   const pendingIds = new Set(uniqueIds)
@@ -56,7 +51,7 @@ export const waitForAll = async (
     }))
 
     const line = statuses.map(({ id, status }) => renderStatus(id, status)).join(' | ')
-    process.stdout.write(`  [wait] ${line}\n`)
+    stdout.write(`  [wait] ${line}\n`)
 
     for (const { id, status } of statuses) {
       if (status.done)

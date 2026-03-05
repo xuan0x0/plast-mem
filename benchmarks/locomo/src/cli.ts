@@ -1,10 +1,10 @@
 import type { BenchmarkOutput, LoCoMoSample, QAResult } from './types'
 
-import process from 'node:process'
-
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
+import { env, exit, loadEnvFile, stdout } from 'node:process'
 import { fileURLToPath } from 'node:url'
+import { parseArgs } from 'node:util'
 
 import { llmJudge, scoreAnswer } from './evaluation'
 import { ingestAll, loadConversationIds, saveConversationIds } from './ingest'
@@ -28,27 +28,48 @@ interface Args {
   useLlmJudge: boolean
 }
 
-const parseArgs = (): Args => {
-  const argv = process.argv.slice(2)
-  const get = (flag: string, fallback: string): string => {
-    const i = argv.indexOf(flag)
-    if (i === -1 || i + 1 >= argv.length)
-      return fallback
-    return argv[i + 1]
-  }
-  const getInt = (flag: string, fallback: number): number => {
-    const raw = get(flag, String(fallback))
-    const value = Number.parseInt(raw, 10)
-    return Number.isFinite(value) && value > 0 ? value : fallback
-  }
-  const sampleIdStr = get('--sample-ids', '')
+const parseCliArgs = (): Args => {
+  const { values } = parseArgs({
+    options: {
+      'concurrency': {
+        default: '4',
+        short: 'c',
+        type: 'string',
+      },
+      'data-file': {
+        short: 'd',
+        type: 'string',
+      },
+      'out-file': {
+        short: 'o',
+        type: 'string',
+      },
+      'sample-ids': {
+        short: 's',
+        type: 'string',
+      },
+      'skip-ingest': {
+        default: false,
+        type: 'boolean',
+      },
+      'use-llm-judge': {
+        default: false,
+        type: 'boolean',
+      },
+    },
+  })
+
+  const concurrency = Number.parseInt(values.concurrency, 10)
+
+  const sampleIdStr = values['sample-ids'] ?? ''
+
   return {
-    concurrency: getInt('--concurrency', 4),
-    dataFile: get('--data-file', resolve(__dirname, '../data/locomo10.json')),
-    outFile: get('--out-file', resolve(__dirname, `../results/${new Date().toISOString().replace(/[:.]/g, '-')}.json`)),
+    concurrency: Number.isFinite(concurrency) && concurrency > 0 ? concurrency : 4,
+    dataFile: values['data-file'] ?? resolve(__dirname, '../data/locomo10.json'),
+    outFile: values['out-file'] ?? resolve(__dirname, `../results/${new Date().toISOString().replace(/[:.]/g, '-')}.json`),
     sampleIds: sampleIdStr.length > 0 ? sampleIdStr.split(',').map(s => s.trim()) : null,
-    skipIngest: argv.includes('--skip-ingest'),
-    useLlmJudge: argv.includes('--use-llm-judge'),
+    skipIngest: values['skip-ingest'],
+    useLlmJudge: values['use-llm-judge'],
   }
 }
 
@@ -81,7 +102,7 @@ const runWithConcurrency = async (
 }
 
 const writeLine = (line: string): void => {
-  process.stdout.write(`${line}\n`)
+  stdout.write(`${line}\n`)
 }
 
 // ──────────────────────────────────────────────────
@@ -91,17 +112,17 @@ const writeLine = (line: string): void => {
 const main = async () => {
   // Load root .env before reading env vars
   try {
-    process.loadEnvFile(resolve(__dirname, '../../../.env'))
+    loadEnvFile(resolve(__dirname, '../../../.env'))
   }
   catch { }
 
-  const args = parseArgs()
-  const baseUrl = (process.env.PLASTMEM_BASE_URL ?? 'http://localhost:3000').replace(/\/$/, '')
-  const model = process.env.OPENAI_CHAT_MODEL ?? 'gpt-4o-mini'
+  const args = parseCliArgs()
+  const baseUrl = (env.PLASTMEM_BASE_URL ?? 'http://localhost:3000').replace(/\/$/, '')
+  const model = env.OPENAI_CHAT_MODEL ?? 'gpt-4o-mini'
 
-  if (process.env.OPENAI_API_KEY == null || process.env.OPENAI_API_KEY.length === 0) {
+  if (env.OPENAI_API_KEY == null || env.OPENAI_API_KEY.length === 0) {
     console.error('Error: OPENAI_API_KEY not set.')
-    process.exit(1)
+    exit(1)
   }
 
   writeLine('LoCoMo Benchmark for plast-mem')
@@ -113,7 +134,7 @@ const main = async () => {
   writeLine(`  llmJudge: ${args.useLlmJudge ? 'on' : 'off'}`)
   writeLine('')
 
-  const raw = readFileSync(args.dataFile, 'utf-8')
+  const raw = await readFile(args.dataFile, 'utf-8')
   const allSamples = JSON.parse(raw) as LoCoMoSample[]
   const sampleIds = args.sampleIds
   const samples = sampleIds != null
@@ -129,12 +150,12 @@ const main = async () => {
   if (!args.skipIngest) {
     writeLine('\n── Step 1: Ingesting conversations ──')
     conversationIds = await ingestAll(samples, baseUrl)
-    saveConversationIds(idsFile, conversationIds)
+    await saveConversationIds(idsFile, conversationIds)
     writeLine('Ingestion complete.')
   }
   else {
     writeLine('Skipping ingestion (--skip-ingest).')
-    conversationIds = loadConversationIds(idsFile)
+    conversationIds = await loadConversationIds(idsFile)
   }
 
   // Step 2: Wait
@@ -160,13 +181,13 @@ const main = async () => {
     writeLine(`  Sample ${sample.sample_id}: ${qaCount} questions`)
 
     // Prefetch contexts with bounded concurrency to avoid overloading embedding backend.
-    process.stdout.write(`  Prefetching ${qaCount} contexts...`)
+    stdout.write(`  Prefetching ${qaCount} contexts...`)
     const contexts: string[] = Array.from({ length: qaCount }, () => '')
     const contextTasks = sample.qa.map((qa, index) => async () => {
       contexts[index] = await getContext(conversationId, qa.question, baseUrl)
     })
     await runWithConcurrency(contextTasks, args.concurrency)
-    process.stdout.write(' done\n')
+    stdout.write(' done\n')
 
     const buffered: Array<null | {
       context: string
@@ -180,7 +201,7 @@ const main = async () => {
     const flush = () => {
       while (nextToPrint < qaCount && buffered[nextToPrint] != null) {
         const { context, llmScore, prediction, qa, score } = buffered[nextToPrint]!
-        process.stdout.write(`    [${nextToPrint + 1}/${qaCount}] generating... f1=${score.toFixed(2)}\n`)
+        stdout.write(`    [${nextToPrint + 1}/${qaCount}] generating... f1=${score.toFixed(2)}\n`)
 
         results.push({
           category: qa.category,
@@ -224,13 +245,13 @@ const main = async () => {
     stats,
   }
 
-  mkdirSync(dirname(args.outFile), { recursive: true })
-  writeFileSync(args.outFile, JSON.stringify(output, null, 2))
+  await mkdir(dirname(args.outFile), { recursive: true })
+  await writeFile(args.outFile, JSON.stringify(output, null, 2))
   writeLine(`Results written to: ${args.outFile}`)
 }
 
 // eslint-disable-next-line @masknet/no-top-level
 main().catch((err) => {
   console.error(err)
-  process.exit(1)
+  exit(1)
 })
