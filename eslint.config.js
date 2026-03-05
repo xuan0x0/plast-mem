@@ -22,5 +22,10 @@ export default defineConfig({
     'toml/padding-line-between-pairs': 'off',
   },
 }).append({
-  ignores: ['**/*.gen.ts'],
+  ignores: [
+    'crates',
+    'src',
+    '**/*.toml',
+    '**/*.gen.ts',
+  ],
 })

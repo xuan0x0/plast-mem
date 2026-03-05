@@ -9,20 +9,35 @@ packages:
   - packages/*
 
 catalog:
+  '@antfu/eslint-config': ^7.4.3
+  '@eslint-react/eslint-plugin': ^2.12.4
   '@insel-null/uuid': ^0.0.1
+  '@moeru/eslint-config': ^0.1.0-beta.16
   '@moeru/std': ^0.1.0-beta.16
+  '@moeru/tsconfig': ^0.1.0-beta.16
   '@pnpm/find-workspace-dir': ^1000.1.4
+  '@types/node': ^25.3.0
   '@types/react': ^19.2.14
+  '@vitejs/plugin-react': ^5.1.4
   '@xsai/generate-text': ^0.4.3
   '@xsai/shared-chat': ^0.4.3
   '@xsai/tool': ^0.4.3
+  eslint: ^10.0.2
+  eslint-plugin-react-hooks: ^7.0.1
+  eslint-plugin-react-refresh: ^0.5.0
   figlet: ^1.10.0
   ink: ^6.8.0
   ink-ascii: ^0.0.4
   ink-spinner: ^5.0.0
   ink-text-input: ^6.0.0
+  picospinner: ^3.0.0
+  pkgroll: ^2.26.2
   react: ^19.2.4
   swr: ^2.4.0
   temporal-polyfill: ^0.3.0
+  tsx: ^4.21.0
+  typescript: ^5.9.3
+  vite: ^7.3.1
+  vite-node: ^5.3.0
   vitest: ^4.0.18
   zod: ^4.3.6

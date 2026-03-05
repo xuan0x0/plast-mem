@@ -8,6 +8,6 @@ services:
       - POSTGRES_PASSWORD=plastmem # TODO: from env
       - POSTGRES_DB=plastmem # TODO: form env
     ports:
-      - "5432:5432"
+      - '5432:5432'
     volumes:
       - ./postgresql/data:/var/lib/postgresql/data/

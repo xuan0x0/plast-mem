@@ -152,8 +152,8 @@ Returns a single object with `semantic` and `episodic` arrays:
       "id": "550e8400-e29b-41d4-a716-446655440000",
       "conversation_id": "550e8400-e29b-41d4-a716-446655440001",
       "messages": [
-        {"role": "user", "content": "..."},
-        {"role": "assistant", "content": "..."}
+        { "role": "user", "content": "..." },
+        { "role": "assistant", "content": "..." }
       ],
       "title": "Career switch to Rust",
       "summary": "User switching careers from Python to Rust...",

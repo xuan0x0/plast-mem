@@ -11,7 +11,7 @@
     "@moeru/std": "catalog:",
     "@xsai/generate-text": "catalog:",
     "@xsai/tool": "catalog:",
-    "picospinner": "^3.0.0",
+    "picospinner": "catalog:",
     "plastmem": "workspace:*",
     "zod": "catalog:"
   }

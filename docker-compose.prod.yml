@@ -6,6 +6,6 @@ services:
     environment:
       - DATABASE_URL=postgres://plastmem:plastmem@localhost/plastmem # TODO: from env
     ports:
-      - "3000:3000"
+      - '3000:3000'
     depends_on:
       - plast-mem-db
