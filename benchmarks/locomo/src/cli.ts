@@ -2,9 +2,11 @@ import type { BenchmarkOutput, LoCoMoSample, QAResult } from './types'
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
-import { env, exit, loadEnvFile, stdout } from 'node:process'
+import { env, exit, loadEnvFile } from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
+
+import { Spinner } from 'picospinner'
 
 import { llmJudge, scoreAnswer } from './evaluation'
 import { ingestAll, loadConversationIds, saveConversationIds } from './ingest'
@@ -177,13 +179,14 @@ const main = async () => {
     console.log(`  Sample ${sample.sample_id}: ${qaCount} questions`)
 
     // Prefetch contexts with bounded concurrency to avoid overloading embedding backend.
-    stdout.write(`  Prefetching ${qaCount} contexts...`)
+    const prefetchSpinner = new Spinner(`Prefetching ${qaCount} contexts`)
+    prefetchSpinner.start()
     const contexts: string[] = Array.from({ length: qaCount }, () => '')
     const contextTasks = sample.qa.map((qa, index) => async () => {
       contexts[index] = await getContext(conversationId, qa.question, baseUrl)
     })
     await runWithConcurrency(contextTasks, args.concurrency)
-    stdout.write(' done\n')
+    prefetchSpinner.succeed(`Prefetched ${qaCount} contexts`)
 
     const buffered: Array<null | {
       context: string

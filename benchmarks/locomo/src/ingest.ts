@@ -3,9 +3,9 @@ import type { BenchmarkAddMessages } from 'plastmem'
 import type { DialogTurn, LoCoMoSample } from './types'
 
 import { readFile, writeFile } from 'node:fs/promises'
-import { stdout } from 'node:process'
 
 import { uuid } from '@insel-null/uuid'
+import { Spinner } from 'picospinner'
 import { benchmarkAddMessages } from 'plastmem'
 
 // Minutes between consecutive turns within a session
@@ -160,16 +160,16 @@ export const ingestAll = async (
     const conversationId = uuid.v7()
     ids[sample.sample_id] = conversationId
 
-    stdout.write(`  Ingesting sample ${sample.sample_id} (${conversationId})...`)
+    const spinner = new Spinner(`Ingesting sample ${sample.sample_id} (${conversationId})`)
     let lastPct = 0
     await ingestSample(sample, conversationId, baseUrl, (done, total) => {
       const pct = Math.floor((done / total) * 100)
       if (pct >= lastPct + 20) {
-        stdout.write(` ${pct}%`)
+        spinner.setText(`Ingesting sample ${sample.sample_id} (${conversationId}) ${pct}%`)
         lastPct = pct
       }
     })
-    stdout.write(' done\n')
+    spinner.succeed(`Ingested sample ${sample.sample_id} (${conversationId})`)
   }
 
   return ids

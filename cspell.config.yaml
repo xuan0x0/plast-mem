@@ -25,6 +25,7 @@ words:
   - oper
   - paradedb
   - pgvector
+  - picospinner
   - pkgs
   - pkill
   - plast
