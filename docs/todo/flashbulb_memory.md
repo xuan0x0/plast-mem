@@ -1,5 +1,7 @@
 # Flashbulb Memory (TODO)
 
+> Index: see `docs/todo/README.md` for current priorities and decisions.
+
 ## What is Flashbulb Memory?
 
 In cognitive science, flashbulb memories are vivid, highly detailed snapshots of emotionally significant events — the kind of memory where you remember exactly where you were and what you were doing. They resist forgetting in a way ordinary memories do not.
@@ -33,20 +35,18 @@ ALTER TABLE episodic_memory ADD COLUMN is_flashbulb BOOLEAN NOT NULL DEFAULT fal
 
 | | Normal Episode | Flashbulb Episode |
 |---|---|---|
-| Retrievability | Decays over time via FSRS | Fixed at **1.0** |
+| Retrievability | Decays over time via FSRS | Still decays, but with a **high floor** (soft-mix) |
 | Memory Review | LLM evaluates relevance | **Skipped** |
 | Stability/Difficulty | Updated by reviews | **Frozen** (never updated) |
-| Retrieval ranking | Score × retrievability | Score × **1.0** (always full weight) |
+| Retrieval ranking | Score × retrievability | Score × `mult`, where `mult = floor + (1-floor)*retrievability` |
 
 In code, the change is minimal — in `retrieve()`, when computing the final score:
 
 ```rust
-let retrievability = if memory.is_flashbulb {
-    1.0
-} else {
-    compute_retrievability(memory.stability, memory.last_reviewed_at)
-};
-let final_score = rrf_score * retrievability;
+let base = compute_retrievability(memory.stability, memory.last_reviewed_at);
+let floor = if memory.is_flashbulb { 0.7 } else { 0.25 };
+let mult = floor + (1.0 - floor) * base;
+let final_score = rrf_score * mult;
 ```
 
 And in the review job, skip flashbulb memories:
@@ -56,6 +56,8 @@ if memory.is_flashbulb {
     continue; // no review needed
 }
 ```
+
+Optional guardrail: cap flashbulb items in final episodic top-N (e.g. max 2–3) to avoid dominance.
 
 ### How Flashbulb Memories Are Created
 
@@ -75,7 +77,7 @@ Flashbulb episodes are still processed by the Semantic Extraction Job — they c
 
 - [ ] Add `is_flashbulb: bool` to `episodic_memory` table (migration)
 - [ ] Update `EpisodicMemory` struct and entity
-- [ ] Modify `retrieve()` — skip retrievability decay for flashbulb memories
+- [ ] Modify `retrieve()` — apply flashbulb soft-mix floor multiplier (do not pin to 1.0)
 - [ ] Modify review job — skip flashbulb memories
 - [ ] Set `is_flashbulb = true` when `surprise >= 0.85` (FLASHBULB_SURPRISE_THRESHOLD) during episode creation
 - [ ] Optional: API endpoint for explicit flashbulb marking

@@ -95,7 +95,10 @@ A terminal chat client demonstrating Plast Mem integration. Key files:
 
 - [Episodic Memory](architecture/episodic_memory.md) - Core memory type for conversation storage
 - [Semantic Memory](architecture/semantic_memory.md) - Long-term facts and behavioral guidelines
+- [Graph Memory](architecture/graph_memory.md) - PostgreSQL-native graph index (recursive CTE) for multi-hop retrieval
 - [Segmentation](architecture/segmentation.md) - Event boundary detection (rules + dual-channel LLM)
 - [FSRS](architecture/fsrs.md) - Spaced repetition mechanics and retrievability
 - [Memory Retrieval](architecture/retrieve_memory.md) - Hybrid search API (BM25 + vector + FSRS rerank)
 - [Memory Review](architecture/memory_review.md) - LLM-based relevance review and FSRS updates
+- [Daily Memory Optimizations](architecture/daily_memory_optimizations.md) - Day-to-day UX improvements (stable prefix, observations, safe compaction)
+- [LongMemEval Optimizations](architecture/longmemeval_optimizations.md) - Benchmark-mode tactics (multi-hop, temporal, updates, abstention)
