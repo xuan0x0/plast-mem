@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use chrono::{TimeDelta, Utc};
+use chrono::TimeDelta;
 use plastmem_entities::message_queue;
 use plastmem_shared::{AppError, Message};
 
@@ -15,10 +15,12 @@ use uuid::Uuid;
 // ──────────────────────────────────────────────────
 
 const MIN_MESSAGES: usize = 5;
-const WINDOW_BASE: usize = 20;
+const WINDOW_BASE: usize = 30;
 const WINDOW_MAX: usize = 40;
-const FENCE_TTL_MINUTES: i64 = 120;
-const SOFT_TIME_TRIGGER_HOURS: i64 = 2;
+pub const FENCE_TTL_MINUTES: i64 = 120;
+const GAP_TRIGGER_HOURS: i64 = 3;
+
+pub const ADD_BACKPRESSURE_LIMIT: i32 = 35;
 
 // ──────────────────────────────────────────────────
 // Types
@@ -45,9 +47,21 @@ pub struct SegmentationCheck {
   pub force_process: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct QueueProcessingStatus {
+  pub messages_pending: i32,
+  pub fence_active: bool,
+}
+
 #[derive(Debug, FromQueryResult)]
 struct PushResult {
   msg_count: i32,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct ProcessingStatusRow {
+  messages_pending: i32,
+  fence_active: bool,
 }
 
 #[derive(Debug, FromQueryResult)]
@@ -61,19 +75,39 @@ struct IdRow {
 // ──────────────────────────────────────────────────
 
 impl MessageQueue {
+  pub async fn get_processing_status(
+    id: Uuid,
+    db: &DatabaseConnection,
+  ) -> Result<QueueProcessingStatus, AppError> {
+    Self::ensure_exists(id, db).await?;
+
+    let sql = "SELECT \
+               COALESCE(jsonb_array_length(messages), 0)::int AS messages_pending, \
+               (in_progress_fence IS NOT NULL) AS fence_active \
+               FROM message_queue \
+               WHERE id = $1";
+
+    let row = ProcessingStatusRow::find_by_statement(Statement::from_sql_and_values(
+      DbBackend::Postgres,
+      sql,
+      [id.into()],
+    ))
+    .one(db)
+    .await?
+    .ok_or_else(|| anyhow!("Queue not found after ensure_exists"))?;
+
+    Ok(QueueProcessingStatus {
+      messages_pending: row.messages_pending,
+      fence_active: row.fence_active,
+    })
+  }
+
   pub async fn get(id: Uuid, db: &DatabaseConnection) -> Result<Self, AppError> {
     let model = Self::get_or_create_model(id, db).await?;
     Self::from_model(model)
   }
 
-  pub async fn get_or_create_model(
-    id: Uuid,
-    db: &DatabaseConnection,
-  ) -> Result<message_queue::Model, AppError> {
-    if let Some(model) = message_queue::Entity::find_by_id(id).one(db).await? {
-      return Ok(model);
-    }
-
+  async fn ensure_exists(id: Uuid, db: &DatabaseConnection) -> Result<(), AppError> {
     let active_model = message_queue::ActiveModel {
       id: Set(id),
       messages: Set(serde_json::to_value(Vec::<Message>::new())?),
@@ -91,6 +125,19 @@ impl MessageQueue {
       )
       .exec_without_returning(db)
       .await?;
+
+    Ok(())
+  }
+
+  pub async fn get_or_create_model(
+    id: Uuid,
+    db: &DatabaseConnection,
+  ) -> Result<message_queue::Model, AppError> {
+    if let Some(model) = message_queue::Entity::find_by_id(id).one(db).await? {
+      return Ok(model);
+    }
+
+    Self::ensure_exists(id, db).await?;
 
     message_queue::Entity::find_by_id(id)
       .one(db)
@@ -111,7 +158,7 @@ impl MessageQueue {
     message: Message,
     db: &DatabaseConnection,
   ) -> Result<Option<SegmentationCheck>, AppError> {
-    Self::get_or_create_model(id, db).await?;
+    Self::ensure_exists(id, db).await?;
 
     let message_json = serde_json::to_value(vec![&message])?;
     let sql = "UPDATE message_queue \
@@ -132,46 +179,6 @@ impl MessageQueue {
       .msg_count;
 
     Self::check(id, trigger_count, db).await
-  }
-
-  /// Push a batch of messages to the queue and return the new message count.
-  pub async fn push_batch(
-    id: Uuid,
-    messages: Vec<Message>,
-    db: &DatabaseConnection,
-  ) -> Result<i32, AppError> {
-    Self::get_or_create_model(id, db).await?;
-
-    if messages.is_empty() {
-      let result = PushResult::find_by_statement(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "SELECT COALESCE(jsonb_array_length(messages), 0)::int AS msg_count FROM message_queue WHERE id = $1",
-        [id.into()],
-      ))
-      .one(db)
-      .await?;
-      return Ok(result.map_or(0, |r| r.msg_count));
-    }
-
-    let message_json = serde_json::to_value(messages)?;
-    let sql = "UPDATE message_queue \
-               SET messages = messages || $1::jsonb \
-               WHERE id = $2 \
-               RETURNING jsonb_array_length(messages) AS msg_count";
-
-    let result = PushResult::find_by_statement(Statement::from_sql_and_values(
-      DbBackend::Postgres,
-      sql,
-      [message_json.into(), id.into()],
-    ))
-    .one(db)
-    .await?;
-
-    let trigger_count = result
-      .ok_or_else(|| AppError::from(anyhow!("Queue not found after push_batch")))?
-      .msg_count;
-
-    Ok(trigger_count)
   }
 
   /// Atomically removes the first `count` messages from the queue.
@@ -216,40 +223,41 @@ impl MessageQueue {
       }
     }
 
-    let trigger_count_usize = usize::try_from(trigger_count).unwrap_or(0);
-    if trigger_count_usize < MIN_MESSAGES {
-      return Ok(None);
-    }
-
-    let count_trigger = trigger_count_usize >= WINDOW_BASE;
-    let force_trigger = trigger_count_usize >= WINDOW_MAX;
     let messages: Vec<plastmem_shared::Message> = serde_json::from_value(model.messages)?;
-    let time_trigger_disabled =
-      std::env::var("DISABLE_TIME_TRIGGER").is_ok_and(|v| v == "true" || v == "1");
-    let time_trigger = !time_trigger_disabled
-      && messages.first().is_some_and(|first| {
-        Utc::now() - first.timestamp > TimeDelta::hours(SOFT_TIME_TRIGGER_HOURS)
+    let trigger_count_usize = usize::try_from(trigger_count).unwrap_or(0);
+    let gap_trigger = messages.len() >= 2
+      && messages.windows(2).last().is_some_and(|pair| {
+        pair[1].timestamp - pair[0].timestamp >= TimeDelta::hours(GAP_TRIGGER_HOURS)
       });
+    let count_trigger = trigger_count_usize >= WINDOW_BASE && trigger_count_usize >= MIN_MESSAGES;
+    let force_trigger = gap_trigger || trigger_count_usize >= WINDOW_MAX;
 
-    if !count_trigger && !time_trigger {
+    if !gap_trigger && !count_trigger {
       return Ok(None);
     }
 
-    if !Self::try_set_fence(id, trigger_count, db).await? {
+    let fence_count = if gap_trigger {
+      trigger_count.saturating_sub(1)
+    } else {
+      trigger_count
+    };
+
+    if fence_count <= 0 || !Self::try_set_fence(id, fence_count, db).await? {
       return Ok(None);
     }
 
     tracing::debug!(
       conversation_id = %id,
       trigger_count,
+      fence_count,
+      gap_trigger,
       count_trigger,
-      time_trigger,
       force_trigger,
       "Segmentation triggered"
     );
 
     Ok(Some(SegmentationCheck {
-      fence_count: trigger_count,
+      fence_count,
       force_process: force_trigger,
     }))
   }
@@ -353,7 +361,7 @@ impl MessageQueue {
     query: String,
     db: &DatabaseConnection,
   ) -> Result<(), AppError> {
-    Self::get_or_create_model(id, db).await?;
+    Self::ensure_exists(id, db).await?;
 
     let review = PendingReview { query, memory_ids };
     let review_value = serde_json::to_value(vec![review])?;
