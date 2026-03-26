@@ -356,18 +356,27 @@ const main = async () => {
   console.log(`Loaded ${samples.length} sample(s).`)
 
   const idsFile = resolve(__dirname, '../data/conversation_ids.json')
+  const savedConversationIds = await loadConversationIds(idsFile)
 
   console.log('\n── Step 1: Ingest ──')
   let conversationIds: Record<string, string>
   if (!args.skipIngest) {
     console.log('  Ingesting conversations...')
-    conversationIds = await ingestAll(samples, baseUrl, args.concurrency, !args.skipWait)
-    await saveConversationIds(idsFile, conversationIds)
+    conversationIds = await ingestAll(
+      samples,
+      savedConversationIds,
+      baseUrl,
+      args.concurrency,
+      !args.skipWait,
+      async (ids) => {
+        await saveConversationIds(idsFile, ids)
+      },
+    )
     console.log('  Ingestion complete.')
   }
   else {
     console.log('  Skipping ingestion (--skip-ingest).')
-    conversationIds = await loadConversationIds(idsFile)
+    conversationIds = savedConversationIds
   }
 
   if (args.skipWait) {
