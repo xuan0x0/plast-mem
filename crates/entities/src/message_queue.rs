@@ -2,6 +2,7 @@
 
 use sea_orm::entity::prelude::*;
 
+#[expect(clippy::derive_partial_eq_without_eq, reason = "generated")]
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "message_queue")]
 pub struct Model {
