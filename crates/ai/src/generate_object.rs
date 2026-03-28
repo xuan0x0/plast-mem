@@ -3,7 +3,7 @@ use async_openai::{
   Client,
   config::OpenAIConfig,
   types::chat::{
-    ChatCompletionRequestMessage, CreateChatCompletionRequestArgs, ResponseFormat,
+    ChatCompletionRequestMessage, CreateChatCompletionRequestArgs, ReasoningEffort, ResponseFormat,
     ResponseFormatJsonSchema,
   },
 };
@@ -154,6 +154,7 @@ where
   let request = CreateChatCompletionRequestArgs::default()
     .model(&APP_ENV.openai_chat_model)
     .messages(messages)
+    .reasoning_effort(ReasoningEffort::None)
     .response_format(ResponseFormat::JsonSchema {
       json_schema: ResponseFormatJsonSchema {
         description: schema_description,

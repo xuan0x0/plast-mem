@@ -2,7 +2,7 @@ use anyhow::anyhow;
 use async_openai::{
   Client,
   config::OpenAIConfig,
-  types::chat::{ChatCompletionRequestMessage, CreateChatCompletionRequestArgs},
+  types::chat::{ChatCompletionRequestMessage, CreateChatCompletionRequestArgs, ReasoningEffort},
 };
 use plastmem_shared::{APP_ENV, AppError};
 
@@ -20,6 +20,7 @@ pub async fn generate_text(
   let request = CreateChatCompletionRequestArgs::default()
     .model(&APP_ENV.openai_chat_model)
     .messages(messages)
+    .reasoning_effort(ReasoningEffort::None)
     .build()?;
 
   let chat = client.chat();
