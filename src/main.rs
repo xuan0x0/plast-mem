@@ -1,6 +1,6 @@
-use apalis_postgres::PostgresStorage;
 #[cfg(debug_assertions)]
 use apalis_board_api::sse::{TracingBroadcaster, TracingSubscriber};
+use apalis_postgres::PostgresStorage;
 use plastmem_migration::{Migrator, MigratorTrait};
 use plastmem_server::server;
 use plastmem_shared::{APP_ENV, AppError};

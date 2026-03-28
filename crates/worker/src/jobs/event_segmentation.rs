@@ -227,17 +227,20 @@ fn build_segmentation_user_content(
     },
   );
 
-  retry_reason.map_or_else(|| request.clone(), |reason| {
-    format!(
-      "The previous segmentation plan was invalid.\n\
+  retry_reason.map_or_else(
+    || request.clone(),
+    |reason| {
+      format!(
+        "The previous segmentation plan was invalid.\n\
        Failure reason: {reason}\n\n\
        Re-segment the same messages.\n\
        Return only valid 0-based segment start indices.\n\
        Do not include segment ends.\n\
        Do not create catch-all tail segments.\n\n\
        {request}"
-    )
-  })
+      )
+    },
+  )
 }
 
 async fn request_segmentation_plan(
@@ -302,7 +305,9 @@ fn resolve_segmentation_plan(
   for (idx, (start, surprise_level)) in starts.iter().enumerate() {
     let end = starts
       .get(idx + 1)
-      .map_or(batch_len - 1, |(next_start, _)| next_start.saturating_sub(1));
+      .map_or(batch_len - 1, |(next_start, _)| {
+        next_start.saturating_sub(1)
+      });
 
     resolved.push(BatchSegment {
       messages: messages[*start..=end].to_vec(),

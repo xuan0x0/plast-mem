@@ -52,9 +52,7 @@ where
   request_openai_with_retry(&mut operation, "Embedding request failed after retries").await
 }
 
-pub async fn request_chat_completion_with_retry<T, F, Fut>(
-  mut operation: F,
-) -> Result<T, AppError>
+pub async fn request_chat_completion_with_retry<T, F, Fut>(mut operation: F) -> Result<T, AppError>
 where
   F: FnMut() -> Fut,
   Fut: Future<Output = Result<T, OpenAIError>>,
@@ -165,11 +163,7 @@ impl std::fmt::Display for OpenAIRequestError {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
       Self::OpenAI(err) => write!(f, "{err}"),
-      Self::Timeout(duration) => write!(
-        f,
-        "request timed out after {}s",
-        duration.as_secs()
-      ),
+      Self::Timeout(duration) => write!(f, "request timed out after {}s", duration.as_secs()),
     }
   }
 }

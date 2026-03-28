@@ -2,7 +2,9 @@ use std::time::Instant;
 
 use apalis::prelude::Data;
 use chrono::Utc;
-use plastmem_ai::{ChatCompletionRequestMessage, embed, embed_many, generate_object, generate_text};
+use plastmem_ai::{
+  ChatCompletionRequestMessage, embed, embed_many, generate_object, generate_text,
+};
 use plastmem_core::{EpisodicMemory, SemanticMemory};
 
 use plastmem_entities::{episodic_memory, semantic_memory};

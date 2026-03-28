@@ -1,5 +1,8 @@
 use apalis::prelude::TaskSink;
-use axum::{Json, extract::{Query, State}};
+use axum::{
+  Json,
+  extract::{Query, State},
+};
 use plastmem_core::{ADD_BACKPRESSURE_LIMIT, FENCE_TTL_MINUTES, MessageQueue};
 use plastmem_shared::AppError;
 use plastmem_worker::EventSegmentationJob;
@@ -148,8 +151,7 @@ async fn get_queue_status(
   db: &DatabaseConnection,
 ) -> Result<BenchmarkJobStatus, AppError> {
   let mut queue_status = MessageQueue::get_processing_status(id, db).await?;
-  if queue_status.fence_active
-    && MessageQueue::clear_stale_fence(id, FENCE_TTL_MINUTES, db).await?
+  if queue_status.fence_active && MessageQueue::clear_stale_fence(id, FENCE_TTL_MINUTES, db).await?
   {
     queue_status = MessageQueue::get_processing_status(id, db).await?;
   }

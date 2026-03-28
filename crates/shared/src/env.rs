@@ -6,13 +6,13 @@ fn required_env(key: &str) -> String {
 }
 
 fn bool_env(key: &str, default: bool) -> bool {
-  env::var(key)
-    .ok()
-    .map_or(default, |value| match value.trim().to_ascii_lowercase().as_str() {
+  env::var(key).ok().map_or(default, |value| {
+    match value.trim().to_ascii_lowercase().as_str() {
       "1" | "true" | "yes" | "on" => true,
       "0" | "false" | "no" | "off" => false,
       _ => default,
-    })
+    }
+  })
 }
 
 fn u64_env(key: &str, default: u64) -> u64 {
