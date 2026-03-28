@@ -2,46 +2,21 @@ import type { AddMessage } from 'plastmem'
 
 import type { DialogTurn, LoCoMoSample } from './types'
 
-import { readFile, writeFile } from 'node:fs/promises'
-
+import { spinner as createSpinner, log } from '@clack/prompts'
 import { uuid } from '@insel-null/uuid'
-import { Spinner } from 'picospinner'
 import { addMessage } from 'plastmem'
 
+import { runWithConcurrency } from './concurrency'
 import { flushConversationTailWhenReady, waitUntilConversationAdmissible } from './wait'
 
 // Minutes between consecutive turns within a session
 const TURN_INTERVAL_MINS = 1
+export interface OrderedSession { date: Date | null, turns: DialogTurn[] }
+
 interface BatchMessage {
   content: string
   role: string
   timestamp?: number
-}
-interface OrderedSession { date: Date | null, turns: DialogTurn[] }
-
-const runWithConcurrency = async (
-  tasks: Array<() => Promise<void>>,
-  concurrency: number,
-): Promise<void> => {
-  if (tasks.length === 0)
-    return
-
-  const limit = Math.max(1, Math.floor(concurrency))
-  let nextIndex = 0
-
-  const worker = async (): Promise<void> => {
-    while (true) {
-      const taskIndex = nextIndex
-      nextIndex += 1
-      if (taskIndex >= tasks.length)
-        return
-      await tasks[taskIndex]()
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(limit, tasks.length) }, async () => worker()),
-  )
 }
 
 const SESSION_DATE_RE = /^(\d{1,2}):(\d{2})\s*(am|pm)\s+on\s+(\d{1,2})\s+(\w+),\s+(\d{4})$/i
@@ -117,7 +92,7 @@ const sendMessage = async (
   throw new Error(`addMessage failed with status ${status}`)
 }
 
-const getOrderedSessions = (sample: LoCoMoSample): OrderedSession[] => {
+export const getOrderedSessions = (sample: LoCoMoSample): OrderedSession[] => {
   const sessions: OrderedSession[] = []
   for (let sn = 1; sn <= 100; sn++) {
     const turns = sample.conversation[`session_${sn}`]
@@ -195,50 +170,31 @@ export const ingestAll = async (
   const tasks = samples.map(sample => async () => {
     const existingConversationId = ids[sample.sample_id]
     if (existingConversationId != null && existingConversationId.length > 0) {
-      console.log(`  Reusing sample ${sample.sample_id} (${existingConversationId})`)
+      log.info(`Reusing sample ${sample.sample_id} (${existingConversationId})`)
       return
     }
 
     const conversationId = uuid.v7()
-    console.log(`  Ingesting sample ${sample.sample_id} (${conversationId})`)
-    const spinner = new Spinner(`Ingesting sample ${sample.sample_id}`)
-    let lastPct = 0
+    const spinner = createSpinner()
+    spinner.start(`Ingesting sample ${sample.sample_id} (${conversationId})`)
     await ingestSample(sample, conversationId, baseUrl, (done, total) => {
-      const pct = Math.floor((done / total) * 100)
-      if (pct >= lastPct + 20) {
-        spinner.setText(`Ingesting sample ${sample.sample_id} (${conversationId}) ${pct}%`)
-        lastPct = pct
-      }
+      spinner.message(`Ingesting sample ${sample.sample_id} (${conversationId}) ${done}/${total}`)
     })
     if (settleAndFlushAfterSampleIngest) {
-      spinner.setText(`Waiting for episodic settle on sample ${sample.sample_id} (${conversationId})`)
+      spinner.message(`Waiting for episodic settle on sample ${sample.sample_id} (${conversationId})`)
       const flushed = await flushConversationTailWhenReady(baseUrl, conversationId)
       if (flushed)
-        spinner.setText(`Flushed episodic tail for sample ${sample.sample_id} (${conversationId})`)
+        spinner.message(`Flushed episodic tail for sample ${sample.sample_id} (${conversationId})`)
     }
     ids[sample.sample_id] = conversationId
     if (onSampleComplete != null) {
       persistChain = persistChain.then(async () => onSampleComplete({ ...ids }))
       await persistChain
     }
-    spinner.succeed(`Ingested sample ${sample.sample_id} (${conversationId})`)
+    spinner.stop(`Ingested sample ${sample.sample_id} (${conversationId})`)
   })
 
   await runWithConcurrency(tasks, concurrency)
 
   return ids
-}
-
-export const loadConversationIds = async (path: string): Promise<Record<string, string>> => {
-  try {
-    const content = await readFile(path, 'utf-8')
-    return JSON.parse(content) as Record<string, string>
-  }
-  catch {
-    return {}
-  }
-}
-
-export const saveConversationIds = async (path: string, ids: Record<string, string>): Promise<void> => {
-  await writeFile(path, JSON.stringify(ids, null, 2))
 }

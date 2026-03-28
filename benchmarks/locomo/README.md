@@ -21,28 +21,63 @@ OPENAI_CHAT_MODEL=qwen3:8b
 ## Usage
 
 ```bash
-# full run: ingest → evaluate
+# interactive run
 pnpm -F @plastmem/benchmark-locomo start
-
-# skip ingestion (reuse previously ingested conversations)
-pnpm -F @plastmem/benchmark-locomo start -- --skip-ingest
-
-# run specific samples only
-pnpm -F @plastmem/benchmark-locomo start -- --sample-ids sample_1,sample_2
-
-# custom input/output paths
-pnpm -F @plastmem/benchmark-locomo start -- \
-  --data-file ./data/locomo10.json \
-  --out-file ./results/run-1.json
 ```
 
 ## Pipeline
 
 ```
-1. Ingest    — replay each conversation turn-by-turn into plast-mem via addMessage
-2. Evaluate  — for each QA pair: retrieveMemory context → LLM answer → F1 score
-3. Output    — write results JSON + print per-category summary
+for each selected sample:
+1. Ingest    — replay the conversation turn-by-turn into plast-mem via addMessage
+2. Eval      — run plast-mem QA, and optionally Full Context QA
+3. Score     — compute F1 / Nemori F1 / optional LLM judge
+4. Persist   — update checkpoint + aggregate output JSON
 ```
+
+## Interactive Options
+
+At startup the CLI prompts for:
+
+- answer model (prefilled from `OPENAI_CHAT_MODEL`; the chosen model is recorded in the output JSON metadata)
+- sample scope (defaults to `conv-42`, `conv-44`, `conv-48`, `conv-50`; can switch to `all` or custom selection)
+- compare mode (`plast-mem only` or `plast-mem + Full Context`)
+- whether to enable LLM judge scoring
+
+The benchmark always:
+
+- uses QA concurrency `4`
+- waits for background jobs after each sample ingest
+
+If a previous checkpoint exists in `benchmarks/locomo/results/`, the CLI first asks whether to resume that latest checkpoint. When resuming, it reuses the saved config instead of asking for fresh run options.
+
+`PLASTMEM_BASE_URL` is read from the root `.env`. If unset, it defaults to `http://localhost:3000`.
+`OPENAI_CHAT_MODEL` is read from the root `.env`. If unset, the CLI exits with an error.
+
+## Resume / Checkpoint
+
+- The dataset is always loaded from `benchmarks/locomo/data/locomo10.json`
+- If that file is missing, the CLI exits with the expected path and a `curl` command to download it
+- Each output file writes a sibling checkpoint file: `results/<run>.checkpoint.json`
+- Fresh runs always write to a timestamped output path automatically
+- Progress is persisted at sample-stage granularity:
+  - ingest complete
+  - plast-mem eval complete
+  - plast-mem score complete
+  - full-context eval complete
+  - full-context score complete
+- On restart, the CLI detects a compatible checkpoint and asks whether to resume it
+- Final results and checkpoint state are stored separately
+
+## Full Context Baseline
+
+- `plast-mem` is always run
+- `Full Context` is optional and can be enabled in the interactive prompt
+- The Full Context baseline follows the LoCoMo official non-RAG style:
+  - build a chronological transcript from the full conversation
+  - feed that transcript directly to the answer model
+  - do not apply retrieval, reranking, or query-aware chunking
+- This benchmark does not truncate for context length. If the model cannot handle the transcript, the sample fails and can be resumed later.
 
 ## QA Categories
 
@@ -60,24 +95,36 @@ Results are written to `results/<timestamp>.json`:
 
 ```json
 {
-  "meta": { "model": "...", "base_url": "...", "timestamp": "..." },
-  "stats": {
-    "overall": 0.42,
-    "by_category": { "1": 0.38, "2": 0.51, "3": "..." },
-    "by_category_count": { "1": 120, "2": 340, "3": "..." }
+  "meta": {
+    "model": "...",
+    "base_url": "...",
+    "timestamp": "...",
+    "compare_full_context": true
   },
-  "results": [
-    {
-      "sample_id": "...",
-      "category": 2,
-      "question": "...",
-      "gold_answer": "...",
-      "prediction": "...",
-      "score": 0.8,
-      "context_retrieved": "...",
-      "evidence": ["..."]
+  "variants": {
+    "plastmem": {
+      "stats": { "overall": { "overall": 0.42, "...": "..." }, "by_sample": { "...": "..." } },
+      "results": [
+        {
+          "sample_id": "...",
+          "category": 2,
+          "question": "...",
+          "gold_answer": "...",
+          "prediction": "...",
+          "score": 0.8,
+          "context_retrieved": "...",
+          "evidence": ["..."]
+        }
+      ]
+    },
+    "full_context": {
+      "stats": { "overall": { "overall": 0.37 } },
+      "results": []
     }
-  ]
+  },
+  "comparison": {
+    "overall": { "score_delta": 0.05 }
+  }
 }
 ```
 
@@ -85,7 +132,9 @@ Results are written to `results/<timestamp>.json`:
 
 | File | Purpose |
 |------|---------|
-| `cli.ts` | Entry point, argument parsing, orchestration |
+| `cli.ts` | Entry point, interactive prompts, orchestration |
+| `checkpoint.ts` | Checkpoint creation, compatibility, persistence |
+| `full-context.ts` | Full transcript baseline context builder |
 | `ingest.ts` | Replay conversations into plast-mem |
 | `retrieve.ts` | `retrieve_memory` call |
 | `llm.ts` | LLM answer generation via `@xsai/generate-text` |

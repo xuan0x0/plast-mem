@@ -1,405 +1,270 @@
-import type { BenchmarkOutput, LoCoMoSample, QAResult } from './types'
+import type { BenchmarkRunConfig, RunCheckpoint } from './checkpoint'
+import type { LoCoMoSample } from './types'
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { readdir, readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
-import { env, exit, loadEnvFile } from 'node:process'
+import { cwd, env, exit, loadEnvFile } from 'node:process'
 import { fileURLToPath } from 'node:url'
-import { parseArgs } from 'node:util'
 
-import { Spinner } from 'picospinner'
+import {
+  cancel,
+  confirm,
+  intro,
+  isCancel,
+  log,
+  multiselect,
+  note,
+  outro,
+  select,
+  text,
+} from '@clack/prompts'
 
-import { llmJudge, scoreAnswer, scoreAnswerNemoriF1 } from './evaluation'
-import { ingestAll, loadConversationIds, saveConversationIds } from './ingest'
-import { generateAnswer } from './llm'
-import { getContext } from './retrieve'
-import { computeStats, printStats } from './stats'
-import { waitForAll } from './wait'
+import {
+  buildCheckpointPath,
+  createCheckpoint,
+  loadCheckpoint,
+} from './checkpoint'
+import { printFinalSummary, runBenchmark } from './runner'
+import { parseLoCoMoSamples } from './schemas'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
-interface Args {
-  concurrency: number
-  dataFile: string
-  outFile: string
-  sampleIds: null | string[]
-  scoreFile: null | string
-  skipIngest: boolean
-  skipWait: boolean
-  useLlmJudge: boolean
+const DEFAULT_DATA_FILE = resolve(cwd(), 'data/locomo10.json')
+const RESULTS_DIR = resolve(cwd(), 'results')
+const CHECKPOINT_FILE_SUFFIX = '.checkpoint.json'
+const COLON_DOT_RE = /[:.]/g
+const LONG_CONTEXT_SAMPLE_IDS = ['conv-43', 'conv-47', 'conv-48'] as const
+const MINIMAL_SAMPLE_IDS = ['conv-42', 'conv-48'] as const
+const DEFAULT_SAMPLE_IDS = ['conv-42', 'conv-44', 'conv-48', 'conv-50'] as const
+const TRAILING_SLASH_RE = /\/$/
+
+const prompt = async <T>(value: Promise<symbol | T>): Promise<T> => {
+  const resolved = await value
+  if (isCancel(resolved)) {
+    cancel('Benchmark cancelled.')
+    exit(0)
+  }
+  return resolved as T
 }
 
-type ArtifactOutput = Omit<BenchmarkOutput, 'results'> & {
-  results: ArtifactResult[]
+const timestampedOutputPath = (): string =>
+  resolve(cwd(), `results/${new Date().toISOString().replace(COLON_DOT_RE, '-')}.json`)
+
+const loadSamples = async (dataFile: string): Promise<LoCoMoSample[]> => {
+  const raw = await readFile(dataFile, 'utf-8')
+  return parseLoCoMoSamples(JSON.parse(raw))
 }
 
-type ArtifactResult = Omit<QAResult, 'llm_judge_score' | 'nemori_f1_score' | 'score'> & {
-  llm_judge_score: null | number
-  nemori_f1_score: null | number
-  score: null | number
+const loadDefaultSamples = async (): Promise<LoCoMoSample[]> => {
+  try {
+    return await loadSamples(DEFAULT_DATA_FILE)
+  }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+      throw error
+
+    throw new Error(
+      `LoCoMo dataset not found at ${DEFAULT_DATA_FILE}.\n`
+      + 'Download it with:\n'
+      + `curl -L https://github.com/snap-research/locomo/raw/main/data/locomo10.json --create-dirs -o ${DEFAULT_DATA_FILE}`,
+    )
+  }
 }
 
-const parseCliArgs = (): Args => {
-  const { values } = parseArgs({
-    options: {
-      'concurrency': {
-        default: '4',
-        short: 'c',
-        type: 'string',
-      },
-      'data-file': {
-        short: 'd',
-        type: 'string',
-      },
-      'out-file': {
-        short: 'o',
-        type: 'string',
-      },
-      'sample-ids': {
-        short: 's',
-        type: 'string',
-      },
-      'score-file': {
-        type: 'string',
-      },
-      'skip-ingest': {
-        default: false,
-        type: 'boolean',
-      },
-      'skip-wait': {
-        default: false,
-        type: 'boolean',
-      },
-      'use-llm-judge': {
-        default: false,
-        type: 'boolean',
-      },
-    },
-  })
+const getRequiredChatModel = (): string => {
+  const model = env.OPENAI_CHAT_MODEL?.trim()
+  if (model == null || model.length === 0) {
+    throw new Error(
+      'OPENAI_CHAT_MODEL not set in the root .env.\n'
+      + 'Set it before running the benchmark.',
+    )
+  }
+  return model
+}
 
-  const concurrency = Number.parseInt(values.concurrency, 10)
-  const sampleIdStr = values['sample-ids'] ?? ''
-  const scoreFile = values['score-file'] ?? null
-  const outFile = values['out-file']
-    ?? scoreFile
-    ?? resolve(__dirname, `../results/${new Date().toISOString().replace(/[:.]/g, '-')}.json`)
+const resolvePresetSampleIds = (
+  allSampleIds: string[],
+  preset: readonly string[],
+): string[] =>
+  allSampleIds.filter(sampleId => preset.includes(sampleId))
+
+const getLatestCheckpointPath = async (): Promise<null | string> => {
+  try {
+    const entries = await readdir(RESULTS_DIR, { withFileTypes: true })
+    const checkpointNames = entries
+      .filter(entry => entry.isFile() && entry.name.endsWith(CHECKPOINT_FILE_SUFFIX))
+      .map(entry => entry.name)
+      .toSorted((left, right) => right.localeCompare(left))
+
+    const latest = checkpointNames[0]
+    if (latest == null)
+      return null
+
+    return resolve(RESULTS_DIR, latest)
+  }
+  catch {
+    return null
+  }
+}
+
+const describeCheckpoint = (checkpoint: RunCheckpoint): string => {
+  const samples = Object.values(checkpoint.samples)
+  const complete = samples.filter(sample => sample.status === 'complete').length
+  const failed = samples.filter(sample => sample.status === 'failed').length
+  const running = samples.filter(sample => sample.status === 'running').length
+  const pending = samples.length - complete - failed - running
+  return [
+    `Started: ${checkpoint.started_at}`,
+    `Updated: ${checkpoint.updated_at}`,
+    `Complete: ${complete}`,
+    `Failed: ${failed}`,
+    `Running: ${running}`,
+    `Pending: ${pending}`,
+  ].join('\n')
+}
+
+const loadLatestCheckpoint = async (): Promise<null | { checkpoint: RunCheckpoint, checkpointPath: string }> => {
+  const checkpointPath = await getLatestCheckpointPath()
+  if (checkpointPath == null)
+    return null
+
+  const checkpoint = await loadCheckpoint(checkpointPath)
+  if (checkpoint == null)
+    return null
+
+  note(describeCheckpoint(checkpoint), 'Latest checkpoint found')
+  const shouldResume = await prompt<boolean>(confirm({
+    initialValue: true,
+    message: 'Resume from the latest checkpoint?',
+  }))
+
+  if (!shouldResume)
+    return null
+
+  return { checkpoint, checkpointPath }
+}
+
+const promptForConfig = async (): Promise<BenchmarkRunConfig> => {
+  const defaultBaseUrl = (env.PLASTMEM_BASE_URL ?? 'http://localhost:3000').replace(TRAILING_SLASH_RE, '')
+  const defaultModel = getRequiredChatModel()
+  const allSamples = await loadDefaultSamples()
+  const allSampleIds = allSamples.map(sample => sample.sample_id)
+  const model = await prompt<string>(text({
+    initialValue: defaultModel,
+    message: 'Answer model',
+    placeholder: defaultModel,
+    validate: value => typeof value === 'string' && value.trim().length > 0 ? undefined : 'Model is required',
+  }))
+  const sampleMode = await prompt<string>(select({
+    initialValue: 'custom',
+    message: 'Which samples should run?',
+    options: [
+      { label: 'Minimal subset (42/48)', value: 'minimal' },
+      { label: 'Recommended subset (42/44/48/50)', value: 'custom' },
+      { label: 'Long-context subset (43/47/48)', value: 'long_context' },
+      { label: 'All samples', value: 'all' },
+    ],
+  }))
+
+  const selectedSampleIds = sampleMode === 'all'
+    ? allSampleIds
+    : sampleMode === 'minimal'
+      ? resolvePresetSampleIds(allSampleIds, MINIMAL_SAMPLE_IDS)
+      : sampleMode === 'long_context'
+        ? resolvePresetSampleIds(allSampleIds, LONG_CONTEXT_SAMPLE_IDS)
+        : await prompt<string[]>(multiselect({
+            initialValues: resolvePresetSampleIds(allSampleIds, DEFAULT_SAMPLE_IDS),
+            message: 'Choose sample IDs',
+            options: allSamples.map(sample => ({
+              label: sample.sample_id,
+              value: sample.sample_id,
+            })),
+            required: true,
+          }))
+
+  const compareMode = await prompt<string>(select({
+    initialValue: 'plastmem',
+    message: 'Comparison mode',
+    options: [
+      { label: 'plast-mem only', value: 'plastmem' },
+      { label: 'plast-mem + Full Context', value: 'compare' },
+    ],
+  }))
+
+  const useLlmJudge = await prompt<boolean>(confirm({
+    initialValue: false,
+    message: 'Enable LLM judge scoring?',
+  }))
 
   return {
-    concurrency: Number.isFinite(concurrency) && concurrency > 0 ? concurrency : 4,
-    dataFile: values['data-file'] ?? resolve(__dirname, '../data/locomo10.json'),
-    outFile,
-    sampleIds: sampleIdStr.length > 0 ? sampleIdStr.split(',').map(s => s.trim()) : null,
-    scoreFile,
-    skipIngest: values['skip-ingest'],
-    skipWait: values['skip-wait'],
-    useLlmJudge: values['use-llm-judge'],
+    baseUrl: defaultBaseUrl,
+    compareFullContext: compareMode === 'compare',
+    dataFile: DEFAULT_DATA_FILE,
+    model: model.trim(),
+    outFile: timestampedOutputPath(),
+    sampleIds: selectedSampleIds.toSorted((left, right) => left.localeCompare(right)),
+    useLlmJudge,
+    waitForBackground: true,
   }
 }
 
-const runWithConcurrency = async (
-  tasks: Array<() => Promise<void>>,
-  concurrency: number,
-): Promise<void> => {
-  if (tasks.length === 0)
-    return
-
-  const limit = Math.max(1, Math.floor(concurrency))
-  let nextIndex = 0
-
-  const worker = async (): Promise<void> => {
-    while (true) {
-      const i = nextIndex
-      nextIndex += 1
-      if (i >= tasks.length)
-        return
-      await tasks[i]()
-    }
-  }
-
-  await Promise.all(Array.from(
-    { length: Math.min(limit, tasks.length) },
-    async () => {
-      await worker()
-    },
-  ))
-}
-
-const buildMeta = (baseUrl: string, dataFile: string, model: string): BenchmarkOutput['meta'] => ({
-  base_url: baseUrl,
-  data_file: dataFile,
-  model,
-  timestamp: new Date().toISOString(),
-})
-
-const isEvaluatedResult = (result: ArtifactResult): result is QAResult =>
-  result.llm_judge_score != null
-  && result.nemori_f1_score != null
-  && result.score != null
-
-const getEvaluatedResults = (results: ArtifactResult[]): QAResult[] =>
-  results.filter(isEvaluatedResult)
-
-const writeArtifact = async (
-  outFile: string,
-  baseUrl: string,
-  dataFile: string,
-  model: string,
-  results: ArtifactResult[],
-): Promise<void> => {
-  const output: ArtifactOutput = {
-    meta: buildMeta(baseUrl, dataFile, model),
-    results,
-    stats: computeStats(getEvaluatedResults(results)),
-  }
-
-  await mkdir(dirname(outFile), { recursive: true })
-  await writeFile(outFile, JSON.stringify(output, null, 2))
-}
-
-const loadArtifact = async (path: string): Promise<ArtifactOutput> => {
-  const raw = await readFile(path, 'utf-8')
-  return JSON.parse(raw) as ArtifactOutput
-}
-
-const runQaStage = async (
+const prepareCheckpoint = async (
+  config: BenchmarkRunConfig,
   samples: LoCoMoSample[],
-  conversationIds: Record<string, string>,
-  baseUrl: string,
-  dataFile: string,
-  model: string,
-  args: Args,
-): Promise<ArtifactResult[]> => {
-  console.log('\n── Step 2: QA ──')
-
-  const results: ArtifactResult[] = []
-
-  for (const sample of samples) {
-    const conversationId = conversationIds[sample.sample_id]
-    if (!conversationId) {
-      console.warn(`  No conversation_id for sample ${sample.sample_id}, skipping.`)
-      continue
-    }
-
-    const qaPairs = sample.qa.filter(qa => qa.category !== 5)
-    const qaCount = qaPairs.length
-    console.log(`  Sample ${sample.sample_id}: ${qaCount} questions`)
-    if (qaCount === 0) {
-      await writeArtifact(args.outFile, baseUrl, dataFile, model, results)
-      continue
-    }
-
-    const prefetchSpinner = new Spinner(`Prefetching ${qaCount} contexts`)
-    prefetchSpinner.start()
-    const contexts: string[] = Array<string>(qaCount).fill('')
-    const contextTasks = qaPairs.map((qa, index) => async () => {
-      contexts[index] = await getContext(conversationId, qa.question, baseUrl)
-    })
-    await runWithConcurrency(contextTasks, args.concurrency)
-    prefetchSpinner.succeed(`Prefetched ${qaCount} contexts`)
-
-    const buffered: Array<ArtifactResult | null> = Array<ArtifactResult | null>(qaCount).fill(null)
-    let nextToPrint = 0
-
-    const flush = () => {
-      while (nextToPrint < qaCount && buffered[nextToPrint] != null) {
-        const result = buffered[nextToPrint]!
-        console.log(`    [${nextToPrint + 1}/${qaCount}] answering...`)
-        results.push(result)
-        buffered[nextToPrint] = null
-        nextToPrint++
-      }
-    }
-
-    const tasks = qaPairs.map((qa, index) => async () => {
-      const context = contexts[index] ?? ''
-      const prediction = await generateAnswer(context, qa.question, qa.category, model)
-      buffered[index] = {
-        category: qa.category,
-        context_retrieved: context,
-        evidence: qa.evidence,
-        gold_answer: qa.answer,
-        llm_judge_score: null,
-        nemori_f1_score: null,
-        prediction,
-        question: qa.question,
-        sample_id: sample.sample_id,
-        score: null,
-      }
-      flush()
-    })
-
-    await runWithConcurrency(tasks, args.concurrency)
-    flush()
-
-    await writeArtifact(args.outFile, baseUrl, dataFile, model, results)
-    console.log(`  Artifact updated: ${args.outFile}`)
+): Promise<{ checkpoint: RunCheckpoint, checkpointPath: string }> => {
+  const checkpointPath = buildCheckpointPath(config.outFile)
+  return {
+    checkpoint: createCheckpoint(config, samples),
+    checkpointPath,
   }
-
-  return results
 }
 
-const runEvalStage = async (
-  results: ArtifactResult[],
-  baseUrl: string,
-  dataFile: string,
-  model: string,
-  args: Args,
-): Promise<QAResult[]> => {
-  console.log('\n── Step 3: Eval ──')
-
-  let startIndex = 0
-  while (startIndex < results.length) {
-    const sampleId = results[startIndex]?.sample_id
-    if (sampleId == null)
-      break
-
-    let endIndex = startIndex
-    while (endIndex < results.length && results[endIndex]?.sample_id === sampleId)
-      endIndex++
-
-    const sampleResults = results.slice(startIndex, endIndex)
-    console.log(`  Sample ${sampleId}: ${sampleResults.length} questions`)
-
-    const buffered: Array<null | { index: number, result: QAResult }> = Array<null | { index: number, result: QAResult }>(sampleResults.length).fill(null)
-    let nextToPrint = 0
-
-    const flush = () => {
-      while (nextToPrint < sampleResults.length && buffered[nextToPrint] != null) {
-        const { index, result } = buffered[nextToPrint]!
-        console.log(
-          `    [${nextToPrint + 1}/${sampleResults.length}] scoring... `
-          + `f1=${result.score.toFixed(2)} `
-          + `nemoriF1=${result.nemori_f1_score.toFixed(2)} `
-          + `llm=${result.llm_judge_score.toFixed(2)}`,
-        )
-
-        results[index] = result
-        buffered[nextToPrint] = null
-        nextToPrint++
-      }
-    }
-
-    const tasks = sampleResults.map((sampleResult, sampleIndex) => async () => {
-      const score = scoreAnswer(sampleResult.prediction, sampleResult.gold_answer, sampleResult.category)
-      const nemoriF1Score = scoreAnswerNemoriF1(sampleResult.prediction, sampleResult.gold_answer)
-      const llmScore = args.useLlmJudge
-        ? await llmJudge(sampleResult.prediction, sampleResult.gold_answer, sampleResult.question, sampleResult.category, model)
-        : 0
-
-      buffered[sampleIndex] = {
-        index: startIndex + sampleIndex,
-        result: {
-          ...sampleResult,
-          llm_judge_score: llmScore,
-          nemori_f1_score: nemoriF1Score,
-          score,
-        },
-      }
-      flush()
-    })
-
-    await runWithConcurrency(tasks, args.concurrency)
-    flush()
-
-    await writeArtifact(args.outFile, baseUrl, dataFile, model, results)
-    console.log(`  Artifact updated: ${args.outFile}`)
-    startIndex = endIndex
-  }
-
-  return getEvaluatedResults(results)
-}
-
-const main = async () => {
+const main = async (): Promise<void> => {
   try {
     loadEnvFile(resolve(__dirname, '../../../.env'))
   }
   catch { }
 
-  const args = parseCliArgs()
-  let baseUrl = (env.PLASTMEM_BASE_URL ?? 'http://localhost:3000').replace(/\/$/, '')
-  let model = env.OPENAI_CHAT_MODEL ?? 'gpt-4o-mini'
-  let dataFile = args.dataFile
+  intro('LoCoMo Benchmark')
 
-  if (args.useLlmJudge && (env.OPENAI_API_KEY == null || env.OPENAI_API_KEY.length === 0)) {
-    console.error('Error: OPENAI_API_KEY not set.')
+  const resumed = await loadLatestCheckpoint()
+  const config = resumed?.checkpoint.config ?? await promptForConfig()
+
+  if (config.useLlmJudge && (env.OPENAI_API_KEY == null || env.OPENAI_API_KEY.length === 0)) {
+    cancel('OPENAI_API_KEY not set for LLM judge mode.')
     exit(1)
   }
 
-  console.log('LoCoMo Benchmark for plast-mem')
-  console.log(`  data:    ${dataFile}`)
-  console.log(`  out:     ${args.outFile}`)
-  console.log(`  model:   ${model}`)
-  console.log(`  baseUrl: ${baseUrl}`)
-  console.log(`  concurrency: ${args.concurrency}`)
-  console.log(`  llmJudge: ${args.useLlmJudge ? 'on' : 'off'}`)
-  if (args.scoreFile != null)
-    console.log(`  scoreFile: ${args.scoreFile}`)
-  console.log()
-
-  if (args.scoreFile != null) {
-    console.log('\n── Score Only ──')
-    const artifact = await loadArtifact(args.scoreFile)
-    baseUrl = artifact.meta.base_url
-    dataFile = artifact.meta.data_file
-    model = artifact.meta.model
-    const evalResults = await runEvalStage(artifact.results, baseUrl, dataFile, model, args)
-    printStats(computeStats(evalResults))
-    console.log(`Results written to: ${args.outFile}`)
-    return
+  const allSamples = await loadDefaultSamples()
+  const samples = allSamples.filter(sample => config.sampleIds.includes(sample.sample_id))
+  if (samples.length === 0) {
+    cancel('No samples selected.')
+    exit(1)
   }
 
-  const raw = await readFile(dataFile, 'utf-8')
-  const allSamples = JSON.parse(raw) as LoCoMoSample[]
-  const samples = args.sampleIds != null
-    ? allSamples.filter(sample => args.sampleIds!.includes(sample.sample_id))
-    : allSamples
+  const { checkpoint, checkpointPath } = resumed ?? await prepareCheckpoint(config, samples)
 
-  console.log(`Loaded ${samples.length} sample(s).`)
+  note([
+    `data: ${config.dataFile}`,
+    `out: ${config.outFile}`,
+    `checkpoint: ${checkpointPath}`,
+    `samples: ${samples.length}`,
+    `model: ${config.model}`,
+    `baseUrl: ${config.baseUrl}`,
+    `llmJudge: ${config.useLlmJudge ? 'on' : 'off'}`,
+    `compare: ${config.compareFullContext ? 'plast-mem + Full Context' : 'plast-mem only'}`,
+  ].join('\n'), 'Run configuration')
 
-  const idsFile = resolve(__dirname, '../data/conversation_ids.json')
-  const savedConversationIds = await loadConversationIds(idsFile)
+  log.step('Running selected samples')
+  const completedCheckpoint = await runBenchmark(checkpoint, checkpointPath, samples)
+  log.success('Benchmark run finished')
 
-  console.log('\n── Step 1: Ingest ──')
-  let conversationIds: Record<string, string>
-  if (!args.skipIngest) {
-    console.log('  Ingesting conversations...')
-    conversationIds = await ingestAll(
-      samples,
-      savedConversationIds,
-      baseUrl,
-      args.concurrency,
-      !args.skipWait,
-      async (ids) => {
-        await saveConversationIds(idsFile, ids)
-      },
-    )
-    console.log('  Ingestion complete.')
-  }
-  else {
-    console.log('  Skipping ingestion (--skip-ingest).')
-    conversationIds = savedConversationIds
-  }
-
-  if (args.skipWait) {
-    console.log('  Skipping wait (--skip-wait).')
-  }
-  else {
-    console.log('  Waiting for all remaining background jobs before QA...')
-    const activeConversationIds = samples
-      .map(sample => conversationIds[sample.sample_id])
-      .filter((id): id is string => id != null && id.length > 0)
-    await waitForAll(activeConversationIds, baseUrl)
-    console.log('  Background processing complete.')
-  }
-
-  const artifactResults = await runQaStage(samples, conversationIds, baseUrl, dataFile, model, args)
-  const evalResults = await runEvalStage(artifactResults, baseUrl, dataFile, model, args)
-
-  printStats(computeStats(evalResults))
-  console.log(`Results written to: ${args.outFile}`)
+  printFinalSummary(completedCheckpoint)
+  outro(`Results written to ${completedCheckpoint.config.outFile}`)
 }
 
 // eslint-disable-next-line @masknet/no-top-level
-main().catch((err) => {
-  console.error(err)
+main().catch((error) => {
+  console.error(error)
   exit(1)
 })

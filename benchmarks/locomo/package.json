@@ -7,12 +7,12 @@
     "start": "tsx src/cli.ts"
   },
   "dependencies": {
+    "@clack/prompts": "catalog:",
     "@insel-null/uuid": "catalog:",
     "@moeru/std": "catalog:",
     "@xsai/embed": "catalog:",
     "@xsai/generate-text": "catalog:",
     "@xsai/tool": "catalog:",
-    "picospinner": "catalog:",
     "plastmem": "workspace:*",
     "zod": "catalog:"
   }
