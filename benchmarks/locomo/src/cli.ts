@@ -16,7 +16,6 @@ import {
   note,
   outro,
   select,
-  text,
 } from '@clack/prompts'
 
 import {
@@ -76,7 +75,7 @@ const getRequiredChatModel = (): string => {
   if (model == null || model.length === 0) {
     throw new Error(
       'OPENAI_CHAT_MODEL not set in the root .env.\n'
-      + 'Set it before running the benchmark.',
+      + 'Set it before running the benchmark; the CLI does not prompt for a model.',
     )
   }
   return model
@@ -149,20 +148,15 @@ const promptForConfig = async (): Promise<BenchmarkRunConfig> => {
   const defaultModel = getRequiredChatModel()
   const allSamples = await loadDefaultSamples()
   const allSampleIds = allSamples.map(sample => sample.sample_id)
-  const model = await prompt<string>(text({
-    initialValue: defaultModel,
-    message: 'Answer model',
-    placeholder: defaultModel,
-    validate: value => typeof value === 'string' && value.trim().length > 0 ? undefined : 'Model is required',
-  }))
   const sampleMode = await prompt<string>(select({
-    initialValue: 'custom',
+    initialValue: 'recommended',
     message: 'Which samples should run?',
     options: [
       { label: 'Minimal subset (42/48)', value: 'minimal' },
-      { label: 'Recommended subset (42/44/48/50)', value: 'custom' },
+      { label: 'Recommended subset (42/44/48/50)', value: 'recommended' },
       { label: 'Long-context subset (43/47/48)', value: 'long_context' },
       { label: 'All samples', value: 'all' },
+      { label: 'Custom selection', value: 'custom' },
     ],
   }))
 
@@ -170,10 +164,12 @@ const promptForConfig = async (): Promise<BenchmarkRunConfig> => {
     ? allSampleIds
     : sampleMode === 'minimal'
       ? resolvePresetSampleIds(allSampleIds, MINIMAL_SAMPLE_IDS)
+      : sampleMode === 'recommended'
+        ? resolvePresetSampleIds(allSampleIds, DEFAULT_SAMPLE_IDS)
       : sampleMode === 'long_context'
         ? resolvePresetSampleIds(allSampleIds, LONG_CONTEXT_SAMPLE_IDS)
         : await prompt<string[]>(multiselect({
-            initialValues: resolvePresetSampleIds(allSampleIds, DEFAULT_SAMPLE_IDS),
+            initialValues: [],
             message: 'Choose sample IDs',
             options: allSamples.map(sample => ({
               label: sample.sample_id,
@@ -200,7 +196,7 @@ const promptForConfig = async (): Promise<BenchmarkRunConfig> => {
     baseUrl: defaultBaseUrl,
     compareFullContext: compareMode === 'compare',
     dataFile: DEFAULT_DATA_FILE,
-    model: model.trim(),
+    model: defaultModel,
     outFile: timestampedOutputPath(),
     sampleIds: selectedSampleIds.toSorted((left, right) => left.localeCompare(right)),
     useLlmJudge,

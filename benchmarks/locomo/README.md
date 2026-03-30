@@ -39,8 +39,7 @@ for each selected sample:
 
 At startup the CLI prompts for:
 
-- answer model (prefilled from `OPENAI_CHAT_MODEL`; the chosen model is recorded in the output JSON metadata)
-- sample scope (defaults to `conv-42`, `conv-44`, `conv-48`, `conv-50`; can switch to `all` or custom selection)
+- sample scope (`Minimal`, `Recommended`, `Long-context`, `All`, or `Custom`; only `Custom` opens sample-by-sample selection, and it defaults to `conv-42`, `conv-44`, `conv-48`, `conv-50`)
 - compare mode (`plast-mem only` or `plast-mem + Full Context`)
 - whether to enable LLM judge scoring
 
@@ -52,7 +51,7 @@ The benchmark always:
 If a previous checkpoint exists in `benchmarks/locomo/results/`, the CLI first asks whether to resume that latest checkpoint. When resuming, it reuses the saved config instead of asking for fresh run options.
 
 `PLASTMEM_BASE_URL` is read from the root `.env`. If unset, it defaults to `http://localhost:3000`.
-`OPENAI_CHAT_MODEL` is read from the root `.env`. If unset, the CLI exits with an error.
+`OPENAI_CHAT_MODEL` is read from the root `.env` and recorded in the output JSON metadata for fresh runs. If unset, the CLI exits with an error instead of prompting interactively.
 
 ## Resume / Checkpoint
 

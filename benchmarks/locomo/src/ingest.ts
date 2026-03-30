@@ -2,7 +2,7 @@ import type { AddMessage } from 'plastmem'
 
 import type { DialogTurn, LoCoMoSample } from './types'
 
-import { spinner as createSpinner, log } from '@clack/prompts'
+import { progress as createProgress, spinner as createSpinner, log } from '@clack/prompts'
 import { uuid } from '@insel-null/uuid'
 import { addMessage } from 'plastmem'
 
@@ -105,14 +105,6 @@ export const getOrderedSessions = (sample: LoCoMoSample): OrderedSession[] => {
   return sessions
 }
 
-const countTotalTurns = (sessions: OrderedSession[]): number =>
-  sessions.reduce((total, session) => total + session.turns.length, 0)
-
-const getSampleLabel = (sampleId: string): string => `Sample ${sampleId}`
-
-const getSampleDebugLabel = (sampleId: string, conversationId: string): string =>
-  `Sample ${sampleId} (${conversationId})`
-
 const getTurnTimestampMs = (sessionDate: Date | null, turnIndex: number): number | undefined => {
   if (sessionDate == null)
     return undefined
@@ -121,22 +113,13 @@ const getTurnTimestampMs = (sessionDate: Date | null, turnIndex: number): number
   return timestamp.getTime()
 }
 
-const ingestSample = async (
-  sample: LoCoMoSample,
-  conversationId: string,
-  baseUrl: string,
-  onProgress?: (done: number, total: number) => void,
-): Promise<void> => {
+const buildMessages = (sample: LoCoMoSample): BatchMessage[] => {
   const sessions = getOrderedSessions(sample)
-  const totalTurns = countTotalTurns(sessions)
   const messages: BatchMessage[] = []
-
-  let done = 0
 
   for (const session of sessions) {
     for (let i = 0; i < session.turns.length; i++) {
       const turn = session.turns[i]
-      done++
       if (turn == null || turn.text.trim().length === 0)
         continue
 
@@ -146,15 +129,35 @@ const ingestSample = async (
         role: turn.speaker.trim() || 'User',
         ...(timestamp != null ? { timestamp } : {}),
       })
-      onProgress?.(done, totalTurns)
     }
   }
+
+  return messages
+}
+
+const getSampleLabel = (sampleId: string): string => `Sample ${sampleId}`
+
+const getSampleDebugLabel = (sampleId: string, conversationId: string): string =>
+  `Sample ${sampleId} (${conversationId})`
+
+const ingestSample = async (
+  sample: LoCoMoSample,
+  conversationId: string,
+  baseUrl: string,
+  onProgress?: (done: number, total: number) => void,
+): Promise<void> => {
+  const messages = buildMessages(sample)
+  const totalMessages = messages.length
+  let done = 0
 
   for (const message of messages) {
     while (true) {
       const accepted = await sendMessage(baseUrl, conversationId, message)
-      if (accepted)
+      if (accepted) {
+        done++
+        onProgress?.(done, totalMessages)
         break
+      }
 
       await waitUntilConversationAdmissible(baseUrl, conversationId)
     }
@@ -180,23 +183,29 @@ export const ingestAll = async (
     }
 
     const conversationId = uuid.v7()
-    const spinner = createSpinner()
-    spinner.start(`${getSampleDebugLabel(sample.sample_id, conversationId)} ingesting`)
+    const totalMessages = buildMessages(sample).length
+    const progress = createProgress({ max: Math.max(totalMessages, 1) })
+    progress.start(`${getSampleDebugLabel(sample.sample_id, conversationId)} ingesting 0/${totalMessages}`)
     await ingestSample(sample, conversationId, baseUrl, (done, total) => {
-      spinner.message(`${getSampleLabel(sample.sample_id)} ingesting ${done}/${total}`)
+      progress.advance(1, `${getSampleLabel(sample.sample_id)} ingesting ${done}/${total}`)
     })
     if (settleAndFlushAfterSampleIngest) {
-      spinner.message(`${getSampleLabel(sample.sample_id)} waiting for background jobs`)
+      progress.stop(`${getSampleLabel(sample.sample_id)} ingested ${totalMessages}/${totalMessages}`)
+      const spinner = createSpinner()
+      spinner.start(`${getSampleLabel(sample.sample_id)} waiting for background jobs`)
       const flushed = await flushConversationTailWhenReady(baseUrl, conversationId)
       if (flushed)
         spinner.message(`${getSampleLabel(sample.sample_id)} flushed pending tail`)
+      spinner.stop(`${getSampleLabel(sample.sample_id)} ingested`)
+    }
+    else {
+      progress.stop(`${getSampleLabel(sample.sample_id)} ingested`)
     }
     ids[sample.sample_id] = conversationId
     if (onSampleComplete != null) {
       persistChain = persistChain.then(async () => onSampleComplete({ ...ids }))
       await persistChain
     }
-    spinner.stop(`${getSampleLabel(sample.sample_id)} ingested`)
   })
 
   await runWithConcurrency(tasks, concurrency)
