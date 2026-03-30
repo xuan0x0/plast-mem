@@ -258,6 +258,7 @@ export const llmJudge = async (
   question: string,
   category: QACategory,
   model: string,
+  seed?: number,
 ): Promise<number> => {
   const prompt = buildJudgePrompt(question, goldAnswer, prediction, category)
 
@@ -268,6 +269,7 @@ export const llmJudge = async (
     messages: [{ content: prompt, role: 'user' }],
     model,
     reasoningEffort: 'none',
+    seed,
     temperature: 0,
   })
 

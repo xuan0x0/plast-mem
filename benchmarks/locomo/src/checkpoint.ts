@@ -20,6 +20,7 @@ export interface BenchmarkRunConfig {
   model: string
   outFile: string
   sampleIds: string[]
+  seed?: number
   useLlmJudge: boolean
   waitForBackground: boolean
 }
@@ -76,6 +77,7 @@ const normalizeConfig = (config: BenchmarkRunConfig): string => JSON.stringify({
   dataFile: config.dataFile,
   model: config.model,
   sampleIds: config.sampleIds.toSorted((left, right) => left.localeCompare(right)),
+  seed: config.seed,
   useLlmJudge: config.useLlmJudge,
   waitForBackground: config.waitForBackground,
 })

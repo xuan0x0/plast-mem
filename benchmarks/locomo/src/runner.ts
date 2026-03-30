@@ -15,7 +15,7 @@ import type {
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
-import { log, note, spinner as createSpinner } from '@clack/prompts'
+import { spinner as createSpinner, log, note } from '@clack/prompts'
 
 import { getVariantOrder, saveCheckpoint } from './checkpoint'
 import { runWithConcurrency } from './concurrency'
@@ -49,6 +49,7 @@ const buildMeta = (config: BenchmarkRunConfig): BenchmarkMeta => ({
   data_file: config.dataFile,
   model: config.model,
   sample_ids: config.sampleIds,
+  seed: config.seed,
   timestamp: new Date().toISOString(),
   use_llm_judge: config.useLlmJudge,
 })
@@ -153,7 +154,13 @@ const evaluateVariant = async (
   const results = Array.from<null | PendingQAResult>({ length: qaPairs.length }).fill(null)
   await runWithConcurrency(
     qaPairs.map((qa, index) => async () => {
-      const prediction = await generateAnswer(contexts[index] ?? '', qa.question, qa.category, config.model)
+      const prediction = await generateAnswer(
+        contexts[index] ?? '',
+        qa.question,
+        qa.category,
+        config.model,
+        config.seed,
+      )
       results[index] = {
         category: qa.category,
         context_retrieved: contexts[index] ?? '',
@@ -194,7 +201,14 @@ const scoreVariant = async (
       const score = scoreAnswer(result.prediction, result.gold_answer, result.category)
       const nemoriF1Score = scoreAnswerNemoriF1(result.prediction, result.gold_answer)
       const llmScore = config.useLlmJudge
-        ? await llmJudge(result.prediction, result.gold_answer, result.question, result.category, config.model)
+        ? await llmJudge(
+            result.prediction,
+            result.gold_answer,
+            result.question,
+            result.category,
+            config.model,
+            config.seed,
+          )
         : 0
 
       scored[index] = {

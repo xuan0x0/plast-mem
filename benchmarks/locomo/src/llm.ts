@@ -163,6 +163,7 @@ export const generateAnswer = async (
   question: string,
   category: QACategory,
   model = 'gpt-4o-mini',
+  seed?: number,
 ): Promise<string> => {
   const prompt = buildPrompt(context, question, category)
   const maxTokens = isCompositeQuestion(question) ? 96 : 64
@@ -180,6 +181,7 @@ export const generateAnswer = async (
         ],
         model,
         reasoningEffort: 'none',
+        seed,
         temperature: 0,
       })
 

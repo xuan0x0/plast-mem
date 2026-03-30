@@ -62,6 +62,7 @@ const benchmarkRunConfigSchema = z.object({
   model: z.string(),
   outFile: z.string(),
   sampleIds: z.array(z.string()),
+  seed: z.number().int().optional(),
   useLlmJudge: z.boolean(),
   waitForBackground: z.boolean(),
 })

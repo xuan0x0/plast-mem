@@ -32,7 +32,6 @@ catalog:
   ink-ascii: ^0.0.4
   ink-spinner: ^5.0.0
   ink-text-input: ^6.0.0
-  picospinner: ^3.0.0
   pkgroll: ^2.27.0
   react: ^19.2.4
   swr: ^2.4.0

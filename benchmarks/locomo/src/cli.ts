@@ -81,6 +81,17 @@ const getRequiredChatModel = (): string => {
   return model
 }
 
+const getOptionalChatSeed = (): number | undefined => {
+  const rawSeed = env.OPENAI_CHAT_SEED?.trim()
+  if (rawSeed == null || rawSeed.length === 0)
+    return undefined
+
+  if (!/^-?\d+$/.test(rawSeed))
+    return undefined
+
+  return Number.parseInt(rawSeed, 10)
+}
+
 const resolvePresetSampleIds = (
   allSampleIds: string[],
   preset: readonly string[],
@@ -146,6 +157,7 @@ const loadLatestCheckpoint = async (): Promise<null | { checkpoint: RunCheckpoin
 const promptForConfig = async (): Promise<BenchmarkRunConfig> => {
   const defaultBaseUrl = (env.PLASTMEM_BASE_URL ?? 'http://localhost:3000').replace(TRAILING_SLASH_RE, '')
   const defaultModel = getRequiredChatModel()
+  const defaultSeed = getOptionalChatSeed()
   const allSamples = await loadDefaultSamples()
   const allSampleIds = allSamples.map(sample => sample.sample_id)
   const sampleMode = await prompt<string>(select({
@@ -166,17 +178,17 @@ const promptForConfig = async (): Promise<BenchmarkRunConfig> => {
       ? resolvePresetSampleIds(allSampleIds, MINIMAL_SAMPLE_IDS)
       : sampleMode === 'recommended'
         ? resolvePresetSampleIds(allSampleIds, DEFAULT_SAMPLE_IDS)
-      : sampleMode === 'long_context'
-        ? resolvePresetSampleIds(allSampleIds, LONG_CONTEXT_SAMPLE_IDS)
-        : await prompt<string[]>(multiselect({
-            initialValues: [],
-            message: 'Choose sample IDs',
-            options: allSamples.map(sample => ({
-              label: sample.sample_id,
-              value: sample.sample_id,
-            })),
-            required: true,
-          }))
+        : sampleMode === 'long_context'
+          ? resolvePresetSampleIds(allSampleIds, LONG_CONTEXT_SAMPLE_IDS)
+          : await prompt<string[]>(multiselect({
+              initialValues: [],
+              message: 'Choose sample IDs',
+              options: allSamples.map(sample => ({
+                label: sample.sample_id,
+                value: sample.sample_id,
+              })),
+              required: true,
+            }))
 
   const compareMode = await prompt<string>(select({
     initialValue: 'plastmem',
@@ -199,6 +211,7 @@ const promptForConfig = async (): Promise<BenchmarkRunConfig> => {
     model: defaultModel,
     outFile: timestampedOutputPath(),
     sampleIds: selectedSampleIds.toSorted((left, right) => left.localeCompare(right)),
+    seed: defaultSeed,
     useLlmJudge,
     waitForBackground: true,
   }
@@ -246,6 +259,7 @@ const main = async (): Promise<void> => {
     `checkpoint: ${checkpointPath}`,
     `samples: ${samples.length}`,
     `model: ${config.model}`,
+    `seed: ${config.seed ?? 'unset'}`,
     `baseUrl: ${config.baseUrl}`,
     `llmJudge: ${config.useLlmJudge ? 'on' : 'off'}`,
     `compare: ${config.compareFullContext ? 'plast-mem + Full Context' : 'plast-mem only'}`,

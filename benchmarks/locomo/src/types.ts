@@ -21,6 +21,7 @@ export interface BenchmarkMeta {
   data_file: string
   model: string
   sample_ids: string[]
+  seed?: number
   timestamp: string
   use_llm_judge: boolean
 }

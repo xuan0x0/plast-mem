@@ -16,6 +16,7 @@ PLASTMEM_BASE_URL=http://localhost:3000
 OPENAI_API_KEY=...
 OPENAI_BASE_URL=http://localhost:11434/v1   # Ollama or any OpenAI-compatible endpoint
 OPENAI_CHAT_MODEL=qwen3:8b
+OPENAI_CHAT_SEED=42
 ```
 
 ## Usage
@@ -52,6 +53,7 @@ If a previous checkpoint exists in `benchmarks/locomo/results/`, the CLI first a
 
 `PLASTMEM_BASE_URL` is read from the root `.env`. If unset, it defaults to `http://localhost:3000`.
 `OPENAI_CHAT_MODEL` is read from the root `.env` and recorded in the output JSON metadata for fresh runs. If unset, the CLI exits with an error instead of prompting interactively.
+`OPENAI_CHAT_SEED` is optional. When set in the root `.env`, LoCoMo passes it to the answer model and LLM judge, and records it in checkpoint/output metadata.
 
 ## Resume / Checkpoint
 
@@ -96,6 +98,7 @@ Results are written to `results/<timestamp>.json`:
 {
   "meta": {
     "model": "...",
+    "seed": 42,
     "base_url": "...",
     "timestamp": "...",
     "compare_full_context": true
